@@ -1,4 +1,14 @@
-/.venv
-/__pycache__
+.venv/
+venv/
+ENV/
 
-*.db
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+db/database.db
+db/database.db-journal
+logs/
+
+config/settings.json

@@ -1,0 +1,13 @@
+{
+  // 1. 파이썬 인터프리터를 프로젝트 내부의 가상환경(.venv)으로 강제 고정
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/Scripts/python.exe",
+  
+  // 2. 파일 저장 시 코드를 깔끔하게 자동 정렬(Format)
+  "editor.formatOnSave": true,
+  
+  // 3. Git에 올릴 때 쓸데없는 캐시 파일(.pyc)이 탐색기에 안 보이게 숨기기
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/*.pyc": true
+  }
+}
