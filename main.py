@@ -1,24 +1,58 @@
 import os
 import sys
 
+from core.database_manager import DatabaseManager
+from gui.main_window import MainWindow
+
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-if getattr(sys, 'frozen', False):
-    RUN_DATA_DIR = os.path.join(os.environ['LOCALAPPDATA'], 'FileGraph')
-    DB_PATH = os.path.join(RUN_DATA_DIR, 'database.db')
-    CONFIG_DIR = os.path.join(RUN_DATA_DIR, 'config')
-    LOG_DIR = os.path.join(RUN_DATA_DIR, 'logs')
-else:
-    RUN_DATA_DIR = os.path.join(BASE_DIR, 'db')
-    DB_PATH = os.path.join(RUN_DATA_DIR, 'database.db')
-    CONFIG_DIR = os.path.join(BASE_DIR, 'config')
-    LOG_DIR = os.path.join(BASE_DIR, 'logs')
 
-os.makedirs(RUN_DATA_DIR, exist_ok=True)
-os.makedirs(CONFIG_DIR, exist_ok=True)
-os.makedirs(LOG_DIR, exist_ok=True)
+def get_runtime_paths() -> dict[str, str]:
+    if getattr(sys, "frozen", False):
+        run_data_dir = os.path.join(os.environ["LOCALAPPDATA"], "FileGraph")
+        config_dir = os.path.join(run_data_dir, "config")
+        log_dir = os.path.join(run_data_dir, "logs")
+    else:
+        run_data_dir = os.path.join(BASE_DIR, "db")
+        config_dir = os.path.join(BASE_DIR, "config")
+        log_dir = os.path.join(BASE_DIR, "logs")
 
-TEMPLATE_DB = os.path.join(BASE_DIR, 'db', 'template_db.db')
-if not os.path.exists(DB_PATH) and os.path.exists(TEMPLATE_DB):
-    import shutil
-    shutil.copy(TEMPLATE_DB, DB_PATH)
+    return {
+        "run_data_dir": run_data_dir,
+        "db_path": os.path.join(run_data_dir, "database.db"),
+        "config_dir": config_dir,
+        "log_dir": log_dir,
+    }
+
+
+def initialize_runtime() -> dict[str, str]:
+    paths = get_runtime_paths()
+    os.makedirs(paths["run_data_dir"], exist_ok=True)
+    os.makedirs(paths["config_dir"], exist_ok=True)
+    os.makedirs(paths["log_dir"], exist_ok=True)
+
+    template_db = os.path.join(BASE_DIR, "db", "template_db.db")
+    if not os.path.exists(paths["db_path"]) and os.path.exists(template_db):
+        import shutil
+
+        shutil.copy(template_db, paths["db_path"])
+
+    with DatabaseManager(paths["db_path"]) as database:
+        database.init_db()
+
+    return paths
+
+
+def run() -> int:
+    from PySide6.QtWidgets import QApplication
+
+    paths = initialize_runtime()
+    app = QApplication(sys.argv)
+    window = MainWindow(paths["db_path"])
+    window.show()
+    return app.exec()
+
+
+if __name__ == "__main__":
+    raise SystemExit(run())

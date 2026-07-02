@@ -3,3 +3,4 @@ networkx>=3.0
 scikit-learn>=1.2.0
 requests>=2.31.0
 keyring>=24.0.0
+pytest>=8.0.0
