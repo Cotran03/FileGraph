@@ -1,19 +1,33 @@
+# Virtual environments
 .venv/
 venv/
 ENV/
 
+# Python cache and test artifacts
 __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
+pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
 
-db/
-
+# Runtime data
+db/*.db
+db/*.db-*
+!db/template_db.db
 logs/
-
+*.log
 config/settings.json
 
-pytest_cache
-.ini
+# Local QA/temp files
+.filegraph-*
+*.tmp
 
+# Packaging outputs
+build/
+dist/
+
+# Local agent metadata
 /.agents
