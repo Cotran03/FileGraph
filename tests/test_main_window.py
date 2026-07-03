@@ -18,6 +18,7 @@ from gui.main_window import (
     NODE_CONTEXT_ADD_RELATION,
     NODE_CONTEXT_DELETE_NODE,
     NODE_CONTEXT_EDIT_RELATIONS,
+    NODE_CONTEXT_TOGGLE_CONTAINS,
     build_import_plan,
     expand_import_paths,
     relation_context_label,
@@ -374,6 +375,52 @@ def test_node_context_menu_disables_relation_edit_when_node_has_no_relations(app
 
     assert not edit_menu.isEnabled()
     assert not edit_menu.actions()[0].isEnabled()
+    window.close()
+
+
+def test_folder_context_menu_toggles_contained_file_nodes(app):
+    window = MainWindow(":memory:")
+    folder_id = window.database.add_node("C:/workspace/assets", node_type="FOLDER")
+    file_id = window.database.add_node("C:/workspace/assets/logo.png", node_type="FILE")
+    window.database.add_relation(folder_id, file_id, relation_type_code="CONTAINS", strength="HIGH")
+    window.on_node_selected(window.database.get_node(folder_id))
+    window.reload_graph()
+
+    assert folder_id in window.graph_viewer.node_items
+    assert file_id in window.graph_viewer.node_items
+
+    collapse_menu = window.build_node_context_menu(window.database.get_node(folder_id))
+    collapse_action = action_with_data(collapse_menu, NODE_CONTEXT_TOGGLE_CONTAINS)
+    assert collapse_action.isEnabled()
+    assert "접기" in collapse_action.text()
+
+    collapse_action.trigger()
+
+    assert folder_id in window.graph_viewer.node_items
+    assert file_id not in window.graph_viewer.node_items
+    assert folder_id in window.collapsed_folder_node_ids
+
+    expand_menu = window.build_node_context_menu(window.database.get_node(folder_id))
+    expand_action = action_with_data(expand_menu, NODE_CONTEXT_TOGGLE_CONTAINS)
+    assert "펼치기" in expand_action.text()
+
+    expand_action.trigger()
+
+    assert folder_id in window.graph_viewer.node_items
+    assert file_id in window.graph_viewer.node_items
+    assert folder_id not in window.collapsed_folder_node_ids
+    window.close()
+
+
+def test_folder_context_menu_disables_toggle_without_contained_files(app):
+    window = MainWindow(":memory:")
+    folder_id = window.database.add_node("C:/workspace/assets", node_type="FOLDER")
+
+    menu = window.build_node_context_menu(window.database.get_node(folder_id))
+    toggle_action = action_with_data(menu, NODE_CONTEXT_TOGGLE_CONTAINS)
+
+    assert not toggle_action.isEnabled()
+    assert toggle_action.text() == "내부 파일 없음"
     window.close()
 
 

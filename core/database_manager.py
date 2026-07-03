@@ -178,7 +178,8 @@ class DatabaseManager:
     def conn(self) -> sqlite3.Connection:
         if self._conn is None:
             self.connect()
-        assert self._conn is not None
+        if self._conn is None:
+            raise RuntimeError("Database connection was not initialized.")
         return self._conn
 
     def connect(self) -> sqlite3.Connection:
@@ -384,17 +385,16 @@ class DatabaseManager:
         self.conn.commit()
 
     def update_node_status(self, node_id: int, status: str) -> None:
-        deleted_at_sql = "CURRENT_TIMESTAMP" if status in {"MISSING", "DELETED"} else "NULL"
         self.conn.execute(
-            f"""
+            """
             UPDATE nodes
             SET status = ?,
-                deleted_at = {deleted_at_sql},
+                deleted_at = CASE WHEN ? IN ('MISSING', 'DELETED') THEN CURRENT_TIMESTAMP ELSE NULL END,
                 last_seen = CASE WHEN ? = 'ACTIVE' THEN CURRENT_TIMESTAMP ELSE last_seen END,
                 updated_at = CURRENT_TIMESTAMP
             WHERE node_id = ?
             """,
-            (status, status, node_id),
+            (status, status, status, node_id),
         )
         self.conn.commit()
 
@@ -538,18 +538,8 @@ class DatabaseManager:
         node_id: int | None = None,
         include_deleted: bool = False,
     ) -> list[dict[str, Any]]:
-        params: list[Any] = []
-        where_clauses: list[str] = []
-        if node_id is not None:
-            where_clauses.append("(r.source_id = ? OR r.target_id = ?)")
-            params.extend([node_id, node_id])
-        if not include_deleted:
-            where_clauses.append("s.status <> 'DELETED'")
-            where_clauses.append("t.status <> 'DELETED'")
-        where = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
-
         rows = self.conn.execute(
-            f"""
+            """
             SELECT
                 r.*,
                 rt.code AS relation_type_code,
@@ -561,10 +551,11 @@ class DatabaseManager:
             JOIN relation_types rt ON rt.relation_type_id = r.relation_type_id
             JOIN nodes s ON s.node_id = r.source_id
             JOIN nodes t ON t.node_id = r.target_id
-            {where}
+            WHERE (? IS NULL OR r.source_id = ? OR r.target_id = ?)
+              AND (? = 1 OR (s.status <> 'DELETED' AND t.status <> 'DELETED'))
             ORDER BY r.created_at DESC, r.relation_id DESC
             """,
-            params,
+            (node_id, node_id, node_id, int(include_deleted)),
         ).fetchall()
         return rows_to_dicts(rows)
 
@@ -597,24 +588,27 @@ class DatabaseManager:
         description: Any = _UNSET,
         is_directional: bool | None = None,
     ) -> None:
-        updates: list[str] = ["updated_at = CURRENT_TIMESTAMP"]
-        params: list[Any] = []
-        if relation_type_id is not None:
-            updates.append("relation_type_id = ?")
-            params.append(relation_type_id)
-        if strength is not None:
-            updates.append("strength = ?")
-            params.append(strength)
-        if description is not _UNSET:
-            updates.append("description = ?")
-            params.append(description)
-        if is_directional is not None:
-            updates.append("is_directional = ?")
-            params.append(int(is_directional))
-        params.append(relation_id)
         self.conn.execute(
-            f"UPDATE relations SET {', '.join(updates)} WHERE relation_id = ?",
-            params,
+            """
+            UPDATE relations
+            SET relation_type_id = CASE WHEN ? THEN ? ELSE relation_type_id END,
+                strength = CASE WHEN ? THEN ? ELSE strength END,
+                description = CASE WHEN ? THEN ? ELSE description END,
+                is_directional = CASE WHEN ? THEN ? ELSE is_directional END,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE relation_id = ?
+            """,
+            (
+                int(relation_type_id is not None),
+                relation_type_id,
+                int(strength is not None),
+                strength,
+                int(description is not _UNSET),
+                None if description is _UNSET else description,
+                int(is_directional is not None),
+                None if is_directional is None else int(is_directional),
+                relation_id,
+            ),
         )
         self.conn.commit()
 
@@ -677,7 +671,7 @@ def get_file_identity(path: str | os.PathLike[str]) -> dict[str, str]:
         stat_result = os.stat(normalized_path)
         file_id = str(stat_result.st_ino)
     except OSError:
-        digest = hashlib.sha1(normalized_path.encode("utf-8")).hexdigest()
+        digest = hashlib.sha256(normalized_path.encode("utf-8")).hexdigest()
         file_id = f"path:{digest}"
     return {"file_id": file_id, "volume_serial": volume_serial}
 
@@ -692,7 +686,7 @@ def relation_type_code_from_name(name: str) -> str:
     ascii_code = re.sub(r"[^A-Za-z0-9]+", "_", stripped).strip("_").upper()
     if ascii_code:
         return f"CUSTOM_{ascii_code}"
-    digest = hashlib.sha1(stripped.encode("utf-8")).hexdigest()[:12].upper()
+    digest = hashlib.sha256(stripped.encode("utf-8")).hexdigest()[:12].upper()
     return f"CUSTOM_{digest}"
 
 

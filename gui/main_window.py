@@ -51,6 +51,7 @@ MAX_LAYOUT_SEED = 2_147_483_647
 NODE_CONTEXT_ADD_RELATION = "node_context_add_relation"
 NODE_CONTEXT_EDIT_RELATIONS = "node_context_edit_relations"
 NODE_CONTEXT_DELETE_NODE = "node_context_delete_node"
+NODE_CONTEXT_TOGGLE_CONTAINS = "node_context_toggle_contains"
 
 
 @dataclass(frozen=True)
@@ -69,6 +70,7 @@ class MainWindow(QMainWindow):
         self.database.init_db()
         self.graph_manager = GraphManager(self.database)
         self.selected_node: dict[str, Any] | None = None
+        self.collapsed_folder_node_ids: set[int] = set()
         self.graph_font_size = self._load_graph_font_size()
 
         self.graph_viewer = GraphViewer()
@@ -110,7 +112,8 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"그래프 글자 크기 {self.graph_font_size}pt", 1200)
 
     def next_layout_seed(self) -> int:
-        return random.randint(1, MAX_LAYOUT_SEED)
+        # Layout seed is not security-sensitive.
+        return random.randint(1, MAX_LAYOUT_SEED)  # nosec B311
 
     def _build_toolbar(self) -> None:
         toolbar = QToolBar("Main")
@@ -178,6 +181,7 @@ class MainWindow(QMainWindow):
 
     def reload_graph(self) -> None:
         data = self.graph_manager.get_graph_data()
+        data = self.apply_collapsed_folders(data)
         self.graph_viewer.render_graph(data)
         self.control_panel.set_summary(len(data["nodes"]), len(data["relations"]))
         if self.selected_node:
@@ -194,6 +198,28 @@ class MainWindow(QMainWindow):
             self.control_panel.show_node(None)
             self.control_panel.show_relations(self.database.list_relations())
         self.statusBar().showMessage("그래프를 불러왔습니다.", 2500)
+
+    def apply_collapsed_folders(self, data: dict[str, list[dict[str, Any]]]) -> dict[str, list[dict[str, Any]]]:
+        if not self.collapsed_folder_node_ids:
+            return data
+
+        hidden_node_ids = collapsed_contained_file_node_ids(data, self.collapsed_folder_node_ids)
+        if not hidden_node_ids:
+            return data
+
+        visible_nodes = [
+            node
+            for node in data.get("nodes", [])
+            if int(node["node_id"]) not in hidden_node_ids
+        ]
+        visible_node_ids = {int(node["node_id"]) for node in visible_nodes}
+        visible_relations = [
+            relation
+            for relation in data.get("relations", [])
+            if int(relation["source_id"]) in visible_node_ids
+            and int(relation["target_id"]) in visible_node_ids
+        ]
+        return {"nodes": visible_nodes, "relations": visible_relations}
 
     def scan_file_statuses(self) -> IntegrityScanResult:
         return scan_database_file_statuses(self.database)
@@ -687,6 +713,24 @@ class MainWindow(QMainWindow):
         node_id = int(node["node_id"])
         menu = QMenu(self)
 
+        if node.get("node_type") == "FOLDER":
+            contained_file_count = len(self.contained_file_node_ids(node_id))
+            if contained_file_count:
+                label = (
+                    f"내부 파일 펼치기 ({contained_file_count}개)"
+                    if node_id in self.collapsed_folder_node_ids
+                    else f"내부 파일 접기 ({contained_file_count}개)"
+                )
+            else:
+                label = "내부 파일 없음"
+            toggle_contains_action = menu.addAction(label)
+            toggle_contains_action.setData(NODE_CONTEXT_TOGGLE_CONTAINS)
+            toggle_contains_action.setEnabled(contained_file_count > 0)
+            toggle_contains_action.triggered.connect(
+                lambda _checked=False, node_id=node_id: self.toggle_folder_contents(node_id)
+            )
+            menu.addSeparator()
+
         add_relation_action = menu.addAction("관계 추가")
         add_relation_action.setData(NODE_CONTEXT_ADD_RELATION)
         add_relation_action.triggered.connect(lambda _checked=False: self.add_relation())
@@ -718,6 +762,35 @@ class MainWindow(QMainWindow):
 
         return menu
 
+    def contained_file_node_ids(self, folder_node_id: int) -> set[int]:
+        contained_ids: set[int] = set()
+        for relation in self.database.list_relations(node_id=folder_node_id):
+            if relation.get("relation_type_code") != "CONTAINS":
+                continue
+            if int(relation["source_id"]) != folder_node_id:
+                continue
+            target = self.database.get_node(int(relation["target_id"]))
+            if target is not None and target.get("node_type") == "FILE":
+                contained_ids.add(int(target["node_id"]))
+        return contained_ids
+
+    def toggle_folder_contents(self, folder_node_id: int) -> None:
+        contained_file_count = len(self.contained_file_node_ids(folder_node_id))
+        if contained_file_count == 0:
+            self.statusBar().showMessage("접거나 펼칠 내부 파일이 없습니다.", 2000)
+            return
+
+        if folder_node_id in self.collapsed_folder_node_ids:
+            self.collapsed_folder_node_ids.remove(folder_node_id)
+            action_label = "펼쳤습니다"
+        else:
+            self.collapsed_folder_node_ids.add(folder_node_id)
+            action_label = "접었습니다"
+
+        self.reload_graph()
+        self.graph_viewer.focus_node(folder_node_id)
+        self.statusBar().showMessage(f"내부 파일 {contained_file_count}개를 {action_label}.", 2500)
+
     def on_node_selected(self, node: dict[str, Any]) -> None:
         self.selected_node = node
         self.control_panel.show_node(node)
@@ -732,7 +805,8 @@ class MainWindow(QMainWindow):
         if not path or not Path(path).exists():
             QMessageBox.warning(self, "파일 없음", "현재 경로에서 파일 또는 폴더를 찾을 수 없습니다.")
             return
-        os.startfile(path)
+        # Opens the registered file or folder selected by the user.
+        os.startfile(path)  # nosec B606
 
     def _add_node(self, path: str, *, node_type: str) -> None:
         try:
@@ -910,6 +984,23 @@ def relation_context_label(relation: dict[str, Any]) -> str:
         f"{relation.get('source_name', '')} {direction} {relation.get('target_name', '')} / "
         f"{relation.get('relation_type_name', '')}"
     )
+
+
+def collapsed_contained_file_node_ids(
+    data: dict[str, list[dict[str, Any]]],
+    collapsed_folder_node_ids: set[int],
+) -> set[int]:
+    node_types = {
+        int(node["node_id"]): node.get("node_type")
+        for node in data.get("nodes", [])
+    }
+    return {
+        int(relation["target_id"])
+        for relation in data.get("relations", [])
+        if int(relation["source_id"]) in collapsed_folder_node_ids
+        and relation.get("relation_type_code") == "CONTAINS"
+        and node_types.get(int(relation["target_id"])) == "FILE"
+    }
 
 
 def integrity_scan_status_message(result: IntegrityScanResult) -> str:
