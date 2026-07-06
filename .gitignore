@@ -20,14 +20,21 @@ db/*.db-*
 logs/
 *.log
 config/settings.json
+config/*.local.*
+config/.env*
+config/*secret*
+config/*key*
+!config/README.md
 
-# Local QA/temp files
+# Local QA and temp files
 .filegraph-*
+qa-localappdata*/
 *.tmp
 
 # Packaging outputs
 build/
-dist/
+dist*/
+# FileGraph.spec is intentionally not ignored; it is the PyInstaller build recipe.
 
 # Local agent metadata
 /.agents

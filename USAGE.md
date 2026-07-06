@@ -16,6 +16,13 @@
 .venv\Scripts\python.exe -m pytest
 ```
 
+## 설정과 개인 데이터
+
+- 개발 환경의 로컬 설정은 `config/settings.json`에 생성될 수 있습니다.
+- 빌드된 실행 파일은 `%LOCALAPPDATA%/FileGraph/config/`를 사용합니다.
+- `settings.json`은 Git에 커밋하지 않습니다.
+- API 키 원문은 설정 파일에 저장하지 않고 `keyring`을 사용합니다.
+
 ## 기본 흐름
 
 ### 1. 파일 또는 폴더 추가
