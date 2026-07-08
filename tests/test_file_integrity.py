@@ -1,4 +1,5 @@
 from pathlib import Path
+import shutil
 import uuid
 
 import pytest
@@ -9,6 +10,7 @@ from core.file_integrity import (
     ACTIVE,
     MISSING,
     compute_file_hash,
+    iter_search_files,
     probe_path_status,
     rediscover_missing_nodes,
     scan_file_statuses,
@@ -101,6 +103,26 @@ def test_scan_file_statuses_can_mark_access_denied_and_skips_deleted_nodes(datab
     assert database.get_node(active_id)["status"] == ACCESS_DENIED
     assert database.get_node(deleted_id)["status"] == "DELETED"
     assert probed_node_ids == [active_id]
+
+
+def test_iter_search_files_uses_custom_ignored_dir_names():
+    root_path = Path.cwd() / f".filegraph-search-{uuid.uuid4().hex}"
+    try:
+        keep_path = root_path / "keep"
+        skip_path = root_path / "skip"
+        keep_path.mkdir(parents=True)
+        skip_path.mkdir()
+        visible_file = keep_path / "visible.txt"
+        hidden_file = skip_path / "hidden.txt"
+        visible_file.write_text("visible", encoding="utf-8")
+        hidden_file.write_text("hidden", encoding="utf-8")
+
+        paths = set(iter_search_files([root_path], ignored_dir_names={"skip"}))
+
+        assert visible_file in paths
+        assert hidden_file not in paths
+    finally:
+        shutil.rmtree(root_path, ignore_errors=True)
 
 
 def unique_missing_path(label: str = "missing") -> Path:

@@ -95,9 +95,10 @@ def test_focus_depth_input_emits_depth_for_selected_node(app):
     panel.show_node({"node_id": 3, "name": "brief.md", "node_type": "FILE", "status": "ACTIVE"})
 
     panel.focus_depth_input.setValue(5)
+    panel.focus_view_button.click()
     panel.full_view_button.click()
 
-    assert depths == [5]
+    assert depths == [5, 5]
     assert full_view_requests == [True]
 
 
@@ -123,6 +124,8 @@ def test_check_files_button_emits_request(app):
 
     panel.check_files_button.click()
 
+    assert panel.check_files_button.text() == "파일 위치 갱신"
+    assert "상태를 갱신" in panel.check_files_button.toolTip()
     assert requests == [True]
 
 
@@ -134,3 +137,65 @@ def test_locate_missing_button_emits_request(app):
     panel.locate_missing_button.click()
 
     assert requests == [True]
+
+
+def test_settings_button_opens_separate_settings_flow(app):
+    panel = ControlPanel()
+    requests = []
+    panel.settingsRequested.connect(lambda: requests.append(True))
+
+    panel.settings_button.click()
+
+    assert requests == [True]
+    assert panel.tabs.count() == 1
+
+
+def test_settings_tab_emits_settings_values(app):
+    panel = ControlPanel()
+    ignored_values = []
+    node_modes = []
+    edge_modes = []
+    ai_values = []
+    panel.ignoredFoldersChanged.connect(ignored_values.append)
+    panel.nodeLabelModeChanged.connect(node_modes.append)
+    panel.edgeLabelModeChanged.connect(edge_modes.append)
+    panel.aiSettingsChanged.connect(lambda enabled, model: ai_values.append((enabled, model)))
+
+    panel.ignored_folders_input.setText(".git, build, build")
+    panel.node_label_mode_combo.combo.setCurrentIndex(panel.node_label_mode_combo.combo.findData("files"))
+    panel.edge_label_mode_combo.combo.setCurrentIndex(panel.edge_label_mode_combo.combo.findData("hover"))
+    panel.ai_enabled_check.setChecked(True)
+    panel.gemini_model_input.setText("gemini-test")
+    panel.apply_settings_button.click()
+
+    assert ignored_values == [[".git", "build"]]
+    assert node_modes == ["files"]
+    assert edge_modes == ["hover"]
+    assert ai_values == [(True, "gemini-test")]
+
+
+def test_node_label_mode_combo_has_four_visibility_options(app):
+    panel = ControlPanel()
+
+    values = [
+        panel.node_label_mode_combo.combo.itemData(index)
+        for index in range(panel.node_label_mode_combo.combo.count())
+    ]
+
+    assert values == ["folders", "files", "all", "hover"]
+    assert panel.node_label_mode_combo.combo.currentData() == "hover"
+
+
+def test_delete_button_can_emit_selected_node_group_without_current_node(app):
+    panel = ControlPanel()
+    selected_deletes = []
+    single_deletes = []
+    panel.deleteSelectedNodesRequested.connect(lambda: selected_deletes.append(True))
+    panel.deleteNodeRequested.connect(single_deletes.append)
+
+    panel.set_selected_node_count(2)
+    panel.delete_node_button.click()
+
+    assert selected_deletes == [True]
+    assert single_deletes == []
+    assert panel.delete_node_button.text() == "선택 노드 2개 삭제"

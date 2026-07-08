@@ -1,0 +1,33 @@
+<svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="32" y1="28" x2="224" y2="232" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0F766E"/>
+      <stop offset="0.52" stop-color="#1E293B"/>
+      <stop offset="1" stop-color="#111827"/>
+    </linearGradient>
+    <linearGradient id="page" x1="78" y1="48" x2="178" y2="214" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#DFF7F2"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="58" y1="78" x2="206" y2="188" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#67E8F9"/>
+      <stop offset="1" stop-color="#FBBF24"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="18" y="18" width="220" height="220" rx="48" fill="url(#bg)"/>
+  <path d="M70 80L122 128L70 178M122 128L188 78M122 128L188 178" fill="none" stroke="#5EEAD4" stroke-width="11" stroke-linecap="round" stroke-linejoin="round" opacity="0.42"/>
+
+  <path d="M78 46H154L194 86V210H78V46Z" fill="url(#page)"/>
+  <path d="M154 46V86H194" fill="#BFEFE6"/>
+  <path d="M78 46H154L194 86V210H78V46Z" fill="none" stroke="#F8FAFC" stroke-width="7" stroke-linejoin="round"/>
+  <path d="M99 110H154M99 132H171M99 154H145" fill="none" stroke="#0F766E" stroke-width="9" stroke-linecap="round"/>
+
+  <path d="M72 88L124 132L184 84M72 174L124 132L184 174" fill="none" stroke="url(#accent)" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="72" cy="88" r="18" fill="#67E8F9" stroke="#FFFFFF" stroke-width="7"/>
+  <circle cx="184" cy="84" r="18" fill="#FBBF24" stroke="#FFFFFF" stroke-width="7"/>
+  <circle cx="72" cy="174" r="18" fill="#14B8A6" stroke="#FFFFFF" stroke-width="7"/>
+  <circle cx="184" cy="174" r="18" fill="#38BDF8" stroke="#FFFFFF" stroke-width="7"/>
+  <circle cx="124" cy="132" r="22" fill="#FFFFFF" stroke="#0F766E" stroke-width="8"/>
+  <circle cx="124" cy="132" r="8" fill="#0F766E"/>
+</svg>

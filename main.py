@@ -45,11 +45,17 @@ def initialize_runtime() -> dict[str, str]:
 
 
 def run() -> int:
+    from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import QApplication
 
     paths = initialize_runtime()
     app = QApplication(sys.argv)
+    icon_path = os.path.join(BASE_DIR, "assets", "app.ico")
+    if os.path.exists(icon_path):
+        app.setWindowIcon(QIcon(icon_path))
     window = MainWindow(paths["db_path"])
+    if os.path.exists(icon_path):
+        window.setWindowIcon(QIcon(icon_path))
     window.show()
     return app.exec()
 

@@ -1,18 +1,25 @@
 import os
+import math
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import QMimeData, QPoint, QRectF, QUrl
+from PySide6.QtCore import QEvent, QMimeData, QPoint, QRectF, Qt, QUrl
+from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import QApplication
 
 from gui.graph_viewer import (
     ASSETS_DIR,
+    LABEL_VISIBILITY_ALWAYS,
+    MANUAL_NODE_GAP,
     MAX_GRAPH_FIT_PADDING,
     MIN_GRAPH_FIT_PADDING,
     MIN_GRAPH_FIT_SIZE,
+    NODE_LABEL_MODE_FILES,
+    NODE_LABEL_MODE_FOLDERS,
     GraphViewer,
     expand_rect_to_minimum_size,
+    format_node_label,
     graph_fit_padding,
     local_paths_from_mime_data,
     node_icon_name,
@@ -74,6 +81,19 @@ def test_local_paths_from_mime_data_ignores_mime_without_urls(app):
 def test_node_icon_name_matches_type_status_and_extension(node, icon_name):
     assert node_icon_name(node) == icon_name
     assert node_icon_path(node) == ASSETS_DIR / f"{icon_name}.svg"
+
+
+def test_node_icon_name_uses_extension_overrides():
+    node = {"name": "schema.proto", "node_type": "FILE", "status": "ACTIVE"}
+
+    assert node_icon_name(node, {"proto": "code"}) == "code"
+
+
+def test_format_node_label_keeps_extension_unsplit():
+    label = format_node_label("long_report-name_final.backup.tar", max_line_length=14)
+
+    assert ".tar" in label.splitlines()
+    assert all(line != ".t" for line in label.splitlines())
 
 
 def test_graph_nodes_load_svg_icon_items(app):
@@ -154,6 +174,171 @@ def test_node_and_edge_labels_are_hidden_until_hover(app):
 
     assert not node_item.label_item.isVisible()
     assert not edge_item.label_item.isVisible()
+
+
+def test_label_visibility_modes_can_show_labels_without_hover(app):
+    viewer = GraphViewer()
+    viewer.set_label_visibility_modes(
+        node_mode=LABEL_VISIBILITY_ALWAYS,
+        edge_mode=LABEL_VISIBILITY_ALWAYS,
+    )
+    viewer.render_graph(
+        {
+            "nodes": [
+                {"node_id": 1, "name": "brief.md", "node_type": "FILE", "status": "ACTIVE", "x": 0, "y": 0},
+                {"node_id": 2, "name": "deck.pptx", "node_type": "FILE", "status": "ACTIVE", "x": 100, "y": 0},
+            ],
+            "relations": [
+                {
+                    "relation_id": 1,
+                    "source_id": 1,
+                    "target_id": 2,
+                    "relation_type_name": "참고자료",
+                    "relation_type_color": "#2563EB",
+                    "is_directional": True,
+                    "strength": "HIGH",
+                }
+            ],
+        }
+    )
+
+    assert viewer.node_items[1].label_item.isVisible()
+    assert viewer.edge_items[0].label_item.isVisible()
+
+
+def test_node_label_visibility_can_target_file_or_folder_names(app):
+    viewer = GraphViewer()
+    viewer.render_graph(
+        {
+            "nodes": [
+                {"node_id": 1, "name": "docs", "node_type": "FOLDER", "status": "ACTIVE", "x": 0, "y": 0},
+                {"node_id": 2, "name": "brief.md", "node_type": "FILE", "status": "ACTIVE", "x": 100, "y": 0},
+            ],
+            "relations": [],
+        }
+    )
+
+    viewer.set_label_visibility_modes(node_mode=NODE_LABEL_MODE_FOLDERS)
+
+    assert viewer.node_items[1].label_item.isVisible()
+    assert not viewer.node_items[2].label_item.isVisible()
+
+    viewer.set_label_visibility_modes(node_mode=NODE_LABEL_MODE_FILES)
+
+    assert not viewer.node_items[1].label_item.isVisible()
+    assert viewer.node_items[2].label_item.isVisible()
+
+
+def test_selective_node_label_modes_still_show_hidden_names_on_hover(app):
+    viewer = GraphViewer()
+    viewer.render_graph(
+        {
+            "nodes": [
+                {"node_id": 1, "name": "docs", "node_type": "FOLDER", "status": "ACTIVE", "x": 0, "y": 0},
+                {"node_id": 2, "name": "brief.md", "node_type": "FILE", "status": "ACTIVE", "x": 100, "y": 0},
+            ],
+            "relations": [],
+        }
+    )
+
+    folder_item = viewer.node_items[1]
+    file_item = viewer.node_items[2]
+
+    viewer.set_label_visibility_modes(node_mode=NODE_LABEL_MODE_FOLDERS)
+
+    assert folder_item.label_item.isVisible()
+    assert not file_item.label_item.isVisible()
+
+    file_item.hoverEnterEvent(None)
+    assert file_item.label_item.isVisible()
+    file_item.hoverLeaveEvent(None)
+    assert not file_item.label_item.isVisible()
+
+    viewer.set_label_visibility_modes(node_mode=NODE_LABEL_MODE_FILES)
+
+    assert not folder_item.label_item.isVisible()
+    assert file_item.label_item.isVisible()
+
+    folder_item.hoverEnterEvent(None)
+    assert folder_item.label_item.isVisible()
+    folder_item.hoverLeaveEvent(None)
+    assert not folder_item.label_item.isVisible()
+
+
+def test_collapsed_folder_node_gets_distinct_badge_and_pen(app):
+    viewer = GraphViewer()
+    viewer.render_graph(
+        {
+            "nodes": [
+                {
+                    "node_id": 1,
+                    "name": "assets",
+                    "node_type": "FOLDER",
+                    "status": "ACTIVE",
+                    "x": 0,
+                    "y": 0,
+                    "is_collapsed": True,
+                    "collapsed_file_count": 3,
+                },
+            ],
+            "relations": [],
+        }
+    )
+
+    folder_item = viewer.node_items[1]
+
+    assert folder_item.collapsed_badge_item is not None
+    assert folder_item.collapsed_badge_text is not None
+    assert folder_item.collapsed_badge_text.toPlainText() == "3"
+    assert folder_item.pen().style() == Qt.DashLine
+
+
+def test_note_and_highlight_render_node_indicators(app):
+    viewer = GraphViewer()
+    viewer.render_graph(
+        {
+            "nodes": [
+                {
+                    "node_id": 1,
+                    "name": "brief.md",
+                    "node_type": "FILE",
+                    "status": "ACTIVE",
+                    "x": 0,
+                    "y": 0,
+                    "note": "check this",
+                    "highlight_color": "#F97316",
+                },
+            ],
+            "relations": [],
+        }
+    )
+
+    item = viewer.node_items[1]
+
+    assert item.note_badge_item is not None
+    assert item.pen().color().name().upper() == "#F97316"
+
+
+def test_root_folder_gets_distinct_visual(app):
+    viewer = GraphViewer()
+    viewer.render_graph(
+        {
+            "nodes": [
+                {
+                    "node_id": 1,
+                    "name": "workspace",
+                    "node_type": "FOLDER",
+                    "status": "ACTIVE",
+                    "x": 0,
+                    "y": 0,
+                    "is_root_folder": True,
+                },
+            ],
+            "relations": [],
+        }
+    )
+
+    assert viewer.node_items[1].pen().color().name().upper() == "#B45309"
 
 
 def test_label_font_size_applies_to_current_and_future_labels(app):
@@ -252,6 +437,25 @@ def test_select_nodes_in_scene_rect_selects_intersecting_nodes(app):
     assert not viewer.node_items[3].isSelected()
 
 
+def test_ctrl_a_selects_all_visible_nodes(app):
+    viewer = GraphViewer()
+    viewer.render_graph(
+        {
+            "nodes": [
+                {"node_id": 1, "name": "first.md", "node_type": "FILE", "status": "ACTIVE", "x": 0, "y": 0},
+                {"node_id": 2, "name": "second.md", "node_type": "FILE", "status": "ACTIVE", "x": 100, "y": 0},
+            ],
+            "relations": [],
+        }
+    )
+    event = QKeyEvent(QEvent.KeyPress, Qt.Key_A, Qt.ControlModifier)
+
+    viewer.keyPressEvent(event)
+
+    assert viewer.selected_node_ids() == [1, 2]
+    assert event.isAccepted()
+
+
 def test_selected_node_move_emits_positions_for_all_selected_nodes(app):
     viewer = GraphViewer()
     viewer.render_graph(
@@ -309,6 +513,27 @@ def test_edges_follow_moved_nodes(app):
     assert edge_item.line().x2() == 100
     assert edge_item.line().y2() == 0
     assert not edge_item.arrow_item.polygon().isEmpty()
+
+
+def test_manual_overlap_resolution_moves_single_node_to_non_overlapping_position(app):
+    viewer = GraphViewer()
+    viewer.render_graph(
+        {
+            "nodes": [
+                {"node_id": 1, "name": "first.md", "node_type": "FILE", "status": "ACTIVE", "x": 0, "y": 0},
+                {"node_id": 2, "name": "second.md", "node_type": "FILE", "status": "ACTIVE", "x": 10, "y": 0},
+            ],
+            "relations": [],
+        }
+    )
+
+    moved_node = viewer.node_items[2]
+    viewer.resolve_single_node_overlap(moved_node)
+
+    first_position = viewer.node_items[1].scenePos()
+    moved_position = moved_node.scenePos()
+    distance = math.hypot(moved_position.x() - first_position.x(), moved_position.y() - first_position.y())
+    assert distance >= viewer.node_items[1].radius + moved_node.radius + MANUAL_NODE_GAP - 1e-6
 
 
 class FakeContextMenuEvent:

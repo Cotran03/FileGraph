@@ -1,12 +1,22 @@
 from __future__ import annotations
 
 import math
+import re
 import sys
 from pathlib import Path, PurePath
 from typing import Any
 
 from PySide6.QtCore import QMimeData, QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QPainter, QPainterPath, QPainterPathStroker, QPen, QPolygonF
+from PySide6.QtGui import (
+    QBrush,
+    QColor,
+    QKeySequence,
+    QPainter,
+    QPainterPath,
+    QPainterPathStroker,
+    QPen,
+    QPolygonF,
+)
 from PySide6.QtSvgWidgets import QGraphicsSvgItem
 from PySide6.QtWidgets import (
     QGraphicsEllipseItem,
@@ -170,11 +180,36 @@ STRENGTH_WIDTHS = {
 DEFAULT_LABEL_FONT_SIZE = 11
 MIN_LABEL_FONT_SIZE = 8
 MAX_LABEL_FONT_SIZE = 24
+LABEL_VISIBILITY_ALWAYS = "always"
+LABEL_VISIBILITY_HOVER = "hover"
+LABEL_VISIBILITY_MODES = {LABEL_VISIBILITY_ALWAYS, LABEL_VISIBILITY_HOVER}
+NODE_LABEL_MODE_FOLDERS = "folders"
+NODE_LABEL_MODE_FILES = "files"
+NODE_LABEL_MODE_ALL = "all"
+NODE_LABEL_MODE_HOVER = LABEL_VISIBILITY_HOVER
+NODE_LABEL_VISIBILITY_MODES = {
+    NODE_LABEL_MODE_FOLDERS,
+    NODE_LABEL_MODE_FILES,
+    NODE_LABEL_MODE_ALL,
+    NODE_LABEL_MODE_HOVER,
+}
+
+ROOT_FOLDER_COLOR = QColor("#B45309")
+ROOT_FOLDER_BACKGROUND = QColor("#FEF3C7")
+HIGHLIGHT_BACKGROUND_LIGHTNESS = 185
 GRAPH_FIT_PADDING_RATIO = 0.08
 MIN_GRAPH_FIT_PADDING = 64.0
 MAX_GRAPH_FIT_PADDING = 96.0
 MIN_GRAPH_FIT_SIZE = 420.0
+MIN_GRAPH_FIT_SCALE = 0.58
 ICON_SIZE_RATIO = 0.62
+LABEL_NODE_GAP = 8.0
+EDGE_LABEL_OFFSET = 18.0
+COLLAPSED_BADGE_DIAMETER = 20.0
+NOTE_BADGE_DIAMETER = 9.0
+MANUAL_NODE_GAP = 20.0
+MANUAL_OVERLAP_ITERATIONS = 20
+NODE_LABEL_MAX_LINE_LENGTH = 18
 ASSETS_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1])) / "assets"
 
 
@@ -184,6 +219,7 @@ class GraphViewer(QGraphicsView):
     nodeContextMenuRequested = Signal(dict, QPoint)
     nodeMoved = Signal(int, float, float)
     pathsDropped = Signal(list)
+    selectedNodesChanged = Signal(list)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -192,6 +228,9 @@ class GraphViewer(QGraphicsView):
         self.node_items: dict[int, NodeItem] = {}
         self.edge_items: list[EdgeItem] = []
         self.label_font_size = DEFAULT_LABEL_FONT_SIZE
+        self.node_label_visibility = LABEL_VISIBILITY_HOVER
+        self.edge_label_visibility = LABEL_VISIBILITY_HOVER
+        self.extension_icon_overrides: dict[str, str] = {}
         self.right_drag_origin: QPoint | None = None
         self.right_drag_selecting = False
         self.selection_rubber_band = QRubberBand(QRubberBand.Shape.Rectangle, self.viewport())
@@ -202,6 +241,8 @@ class GraphViewer(QGraphicsView):
         self.setViewportUpdateMode(QGraphicsView.BoundingRectViewportUpdate)
         self.setBackgroundBrush(QBrush(QColor("#F8FAFC")))
         self.setAcceptDrops(True)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.scene.selectionChanged.connect(self._emit_selected_nodes_changed)
 
     def set_label_font_size(self, point_size: int) -> None:
         self.label_font_size = clamp_label_font_size(point_size)
@@ -210,9 +251,31 @@ class GraphViewer(QGraphicsView):
         for edge_item in self.edge_items:
             edge_item.set_label_font_size(self.label_font_size)
 
+    def set_label_visibility_modes(self, *, node_mode: str | None = None, edge_mode: str | None = None) -> None:
+        if node_mode is not None:
+            self.node_label_visibility = normalize_node_label_visibility_mode(node_mode)
+        if edge_mode is not None:
+            self.edge_label_visibility = normalize_edge_label_visibility_mode(edge_mode)
+        for node_item in self.node_items.values():
+            node_item.sync_label_visibility()
+        for edge_item in self.edge_items:
+            edge_item.sync_label_visibility()
+
+    def set_extension_icon_overrides(self, overrides: dict[str, str] | None) -> None:
+        self.extension_icon_overrides = normalize_extension_icon_overrides(overrides or {})
+        for node_item in self.node_items.values():
+            node_item.icon_name = node_icon_name(node_item.node, self.extension_icon_overrides)
+
     def wheelEvent(self, event) -> None:
         factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
         self.scale(factor, factor)
+
+    def keyPressEvent(self, event) -> None:
+        if event.matches(QKeySequence.SelectAll):
+            self.select_all_nodes()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.RightButton:
@@ -301,10 +364,17 @@ class GraphViewer(QGraphicsView):
             self._add_edge(source_item, target_item, relation)
 
         if nodes:
+            self.position_node_labels()
             self.fit_graph_to_view()
         else:
             self.scene.setSceneRect(-400, -300, 800, 600)
             self.resetTransform()
+            empty_item = QGraphicsTextItem("파일 추가 / 폴더 추가 / 샘플")
+            empty_item.setDefaultTextColor(QColor("#64748B"))
+            apply_label_font_size(empty_item, 13)
+            rect = empty_item.boundingRect()
+            empty_item.setPos(-rect.width() / 2, -rect.height() / 2)
+            self.scene.addItem(empty_item)
 
     def focus_node(self, node_id: int) -> None:
         item = self.node_items.get(node_id)
@@ -324,6 +394,10 @@ class GraphViewer(QGraphicsView):
         self.scene.setSceneRect(fit_rect)
         self.resetTransform()
         self.fitInView(fit_rect, Qt.KeepAspectRatio)
+        if self.transform().m11() < MIN_GRAPH_FIT_SCALE:
+            self.resetTransform()
+            self.scale(MIN_GRAPH_FIT_SCALE, MIN_GRAPH_FIT_SCALE)
+            self.centerOn(graph_rect.center())
 
     def graph_items_bounding_rect(self) -> QRectF:
         graph_items: list[QGraphicsItem] = [*self.node_items.values(), *self.edge_items]
@@ -353,12 +427,20 @@ class GraphViewer(QGraphicsView):
                 selected_node_ids.append(node_id)
         return selected_node_ids
 
+    def select_all_nodes(self) -> list[int]:
+        for node_item in self.node_items.values():
+            node_item.setSelected(True)
+        return self.selected_node_ids()
+
     def selected_node_ids(self) -> list[int]:
         return [
             node_id
             for node_id, node_item in self.node_items.items()
             if node_item.isSelected()
         ]
+
+    def _emit_selected_nodes_changed(self) -> None:
+        self.selectedNodesChanged.emit(self.selected_node_ids())
 
     def _add_edge(self, source_item: "NodeItem", target_item: "NodeItem", relation: dict[str, Any]) -> None:
         edge_item = EdgeItem(source_item, target_item, relation)
@@ -370,6 +452,48 @@ class GraphViewer(QGraphicsView):
         target_item.add_edge(edge_item)
         self.edge_items.append(edge_item)
         edge_item.update_position()
+
+    def position_node_labels(self) -> None:
+        node_items = list(self.node_items.values())
+        for node_item in node_items:
+            node_item.position_label_best_effort(node_items, self.edge_items)
+
+    def adjust_moved_nodes_after_drop(self, moved_nodes: list["NodeItem"]) -> None:
+        if not moved_nodes:
+            return
+        if len(moved_nodes) == 1:
+            self.resolve_single_node_overlap(moved_nodes[0])
+            return
+        self.resolve_group_overlap(moved_nodes)
+
+    def resolve_single_node_overlap(self, moved_node: "NodeItem") -> None:
+        for _iteration in range(MANUAL_OVERLAP_ITERATIONS):
+            shifted = False
+            for other_node in self.node_items.values():
+                if other_node is moved_node:
+                    continue
+                shift = overlap_shift(moved_node, other_node)
+                if shift is None:
+                    continue
+                moved_node.setPos(moved_node.pos() + shift)
+                shifted = True
+            if not shifted:
+                break
+
+    def resolve_group_overlap(self, moved_nodes: list["NodeItem"]) -> None:
+        moved_set = set(moved_nodes)
+        stationary_nodes = [node for node in self.node_items.values() if node not in moved_set]
+        for _iteration in range(MANUAL_OVERLAP_ITERATIONS):
+            total_shift = QPointF(0.0, 0.0)
+            for moved_node in moved_nodes:
+                for stationary_node in stationary_nodes:
+                    shift = overlap_shift(moved_node, stationary_node)
+                    if shift is not None:
+                        total_shift += shift
+            if manhattan_length(total_shift) < 1e-6:
+                break
+            for moved_node in moved_nodes:
+                moved_node.setPos(moved_node.pos() + total_shift)
 
 
 class NodeItem(QGraphicsEllipseItem):
@@ -388,23 +512,32 @@ class NodeItem(QGraphicsEllipseItem):
         )
         self.setAcceptHoverEvents(True)
         self.setBrush(QBrush(node_background_color(node)))
-        self.setPen(QPen(node_color(node), 2.0))
+        self.setPen(node_pen(node))
         self.setZValue(10)
 
-        self.icon_name = node_icon_name(node)
+        self.icon_name = node_icon_name(node, viewer.extension_icon_overrides)
         self.icon_item: QGraphicsSvgItem | None = None
-        icon_path = node_icon_path(node)
+        icon_path = node_icon_path(node, viewer.extension_icon_overrides)
         if icon_path.exists():
             self.icon_item = QGraphicsSvgItem(str(icon_path), self)
             self.icon_item.setAcceptedMouseButtons(Qt.NoButton)
             self.icon_item.setZValue(1)
             self._position_icon()
 
-        self.label_item = QGraphicsTextItem(node.get("name", ""), self)
+        self.collapsed_badge_item: QGraphicsEllipseItem | None = None
+        self.collapsed_badge_text: QGraphicsTextItem | None = None
+        if node.get("is_collapsed"):
+            self._create_collapsed_badge()
+
+        self.note_badge_item: QGraphicsEllipseItem | None = None
+        if node.get("note"):
+            self._create_note_badge()
+
+        self.label_item = QGraphicsTextItem(format_node_label(node.get("name", "")), self)
         self.label_item.setDefaultTextColor(QColor("#0F172A"))
-        self.label_item.setTextWidth(130)
-        self.label_item.setVisible(False)
+        self.label_item.setTextWidth(-1)
         self.set_label_font_size(viewer.label_font_size)
+        self.sync_label_visibility()
 
     def add_edge(self, edge: "EdgeItem") -> None:
         self.connected_edges.append(edge)
@@ -413,6 +546,9 @@ class NodeItem(QGraphicsEllipseItem):
         apply_label_font_size(self.label_item, point_size)
         self._position_label()
 
+    def sync_label_visibility(self) -> None:
+        self.label_item.setVisible(node_label_visible_without_hover(self.node, self.viewer.node_label_visibility))
+
     def itemChange(self, change, value):
         if change == QGraphicsItem.ItemPositionHasChanged:
             for edge in self.connected_edges:
@@ -420,12 +556,14 @@ class NodeItem(QGraphicsEllipseItem):
         return super().itemChange(change, value)
 
     def hoverEnterEvent(self, event) -> None:
-        self.label_item.setVisible(True)
+        if not node_label_visible_without_hover(self.node, self.viewer.node_label_visibility):
+            self.label_item.setVisible(True)
         if event is not None:
             super().hoverEnterEvent(event)
 
     def hoverLeaveEvent(self, event) -> None:
-        self.label_item.setVisible(False)
+        if not node_label_visible_without_hover(self.node, self.viewer.node_label_visibility):
+            self.label_item.setVisible(False)
         if event is not None:
             super().hoverLeaveEvent(event)
 
@@ -444,23 +582,35 @@ class NodeItem(QGraphicsEllipseItem):
 
     def mouseReleaseEvent(self, event) -> None:
         super().mouseReleaseEvent(event)
+        self.viewer.adjust_moved_nodes_after_drop(self.moved_node_items())
         self.emit_moved_nodes()
 
+    def moved_node_items(self) -> list["NodeItem"]:
+        if self.isSelected():
+            scene = self.scene()
+            if scene is not None:
+                selected_nodes = [item for item in scene.selectedItems() if isinstance(item, NodeItem)]
+                if selected_nodes:
+                    return selected_nodes
+        return [self]
+
     def emit_moved_nodes(self) -> None:
-        moved_nodes = [self]
-        scene = self.scene()
-        if scene is not None and self.isSelected():
-            selected_nodes = [item for item in scene.selectedItems() if isinstance(item, NodeItem)]
-            if selected_nodes:
-                moved_nodes = selected_nodes
+        moved_nodes = self.moved_node_items()
 
         for node_item in moved_nodes:
             position = node_item.scenePos()
             self.viewer.nodeMoved.emit(node_item.node["node_id"], position.x(), position.y())
 
+    def position_label_best_effort(self, node_items: list["NodeItem"], edge_items: list["EdgeItem"]) -> None:
+        best_position = min(
+            label_candidate_positions(self),
+            key=lambda position: label_collision_score(self, position, node_items, edge_items),
+        )
+        self.label_item.setPos(best_position)
+
     def _position_label(self) -> None:
         label_rect = self.label_item.boundingRect()
-        self.label_item.setPos(-label_rect.width() / 2, self.radius + 6)
+        self.label_item.setPos(-label_rect.width() / 2, self.radius + LABEL_NODE_GAP)
 
     def _position_icon(self) -> None:
         if self.icon_item is None:
@@ -478,6 +628,40 @@ class NodeItem(QGraphicsEllipseItem):
             -icon_rect.height() * scale / 2,
         )
 
+    def _create_collapsed_badge(self) -> None:
+        count = max(1, int(self.node.get("collapsed_file_count") or 1))
+        label = str(count) if count < 100 else "99+"
+        diameter = COLLAPSED_BADGE_DIAMETER if count < 100 else COLLAPSED_BADGE_DIAMETER + 8.0
+        x = self.radius - diameter * 0.55
+        y = -self.radius - diameter * 0.05
+
+        self.collapsed_badge_item = QGraphicsEllipseItem(x, y, diameter, COLLAPSED_BADGE_DIAMETER, self)
+        self.collapsed_badge_item.setBrush(QBrush(QColor("#0F766E")))
+        self.collapsed_badge_item.setPen(QPen(QColor("#FFFFFF"), 1.4))
+        self.collapsed_badge_item.setAcceptedMouseButtons(Qt.NoButton)
+        self.collapsed_badge_item.setZValue(3)
+
+        self.collapsed_badge_text = QGraphicsTextItem(label, self)
+        self.collapsed_badge_text.setDefaultTextColor(QColor("#FFFFFF"))
+        self.collapsed_badge_text.setAcceptedMouseButtons(Qt.NoButton)
+        self.collapsed_badge_text.setZValue(4)
+        apply_label_font_size(self.collapsed_badge_text, 8)
+        text_rect = self.collapsed_badge_text.boundingRect()
+        self.collapsed_badge_text.setPos(
+            x + (diameter - text_rect.width()) / 2,
+            y + (COLLAPSED_BADGE_DIAMETER - text_rect.height()) / 2 - 1.0,
+        )
+
+    def _create_note_badge(self) -> None:
+        diameter = NOTE_BADGE_DIAMETER
+        x = self.radius - diameter * 0.7
+        y = -self.radius + diameter * 0.15
+        self.note_badge_item = QGraphicsEllipseItem(x, y, diameter, diameter, self)
+        self.note_badge_item.setBrush(QBrush(QColor("#F97316")))
+        self.note_badge_item.setPen(QPen(QColor("#FFFFFF"), 1.2))
+        self.note_badge_item.setAcceptedMouseButtons(Qt.NoButton)
+        self.note_badge_item.setZValue(5)
+
 
 class EdgeItem(QGraphicsLineItem):
     def __init__(self, source_item: NodeItem, target_item: NodeItem, relation: dict[str, Any]) -> None:
@@ -492,7 +676,6 @@ class EdgeItem(QGraphicsLineItem):
 
         self.label_item = QGraphicsTextItem(relation.get("relation_type_name") or "")
         self.label_item.setDefaultTextColor(QColor("#334155"))
-        self.label_item.setVisible(False)
         self.label_item.setZValue(-3)
 
         self.arrow_item: QGraphicsPolygonItem | None = None
@@ -502,10 +685,14 @@ class EdgeItem(QGraphicsLineItem):
             self.arrow_item.setPen(QPen(self.color, 1))
             self.arrow_item.setZValue(-4)
         self.set_label_font_size(source_item.viewer.label_font_size)
+        self.sync_label_visibility()
 
     def set_label_font_size(self, point_size: int) -> None:
         apply_label_font_size(self.label_item, point_size)
         self.update_position()
+
+    def sync_label_visibility(self) -> None:
+        self.label_item.setVisible(self.source_item.viewer.edge_label_visibility == LABEL_VISIBILITY_ALWAYS)
 
     def update_position(self) -> None:
         source_point = self.source_item.scenePos()
@@ -516,18 +703,25 @@ class EdgeItem(QGraphicsLineItem):
             (source_point.x() + target_point.x()) / 2,
             (source_point.y() + target_point.y()) / 2,
         )
-        self.label_item.setPos(midpoint.x() + 6, midpoint.y() + 6)
+        offset = edge_label_offset(source_point, target_point)
+        label_rect = self.label_item.boundingRect()
+        self.label_item.setPos(
+            midpoint.x() + offset.x() - label_rect.width() / 2,
+            midpoint.y() + offset.y() - label_rect.height() / 2,
+        )
 
         if self.arrow_item is not None:
             self.arrow_item.setPolygon(make_arrow_polygon(source_point, target_point, self.target_item.radius))
 
     def hoverEnterEvent(self, event) -> None:
-        self.label_item.setVisible(True)
+        if self.source_item.viewer.edge_label_visibility == LABEL_VISIBILITY_HOVER:
+            self.label_item.setVisible(True)
         if event is not None:
             super().hoverEnterEvent(event)
 
     def hoverLeaveEvent(self, event) -> None:
-        self.label_item.setVisible(False)
+        if self.source_item.viewer.edge_label_visibility == LABEL_VISIBILITY_HOVER:
+            self.label_item.setVisible(False)
         if event is not None:
             super().hoverLeaveEvent(event)
 
@@ -542,6 +736,16 @@ def node_color(node: dict[str, Any]) -> QColor:
     status_color = STATUS_COLORS.get(node.get("status"))
     if status_color is not None:
         return status_color
+    highlight_color = normalized_color(node.get("highlight_color"))
+    if highlight_color is not None:
+        return highlight_color
+    if node.get("is_collapsed"):
+        return QColor("#0F766E")
+    if node.get("is_root_folder"):
+        return ROOT_FOLDER_COLOR
+    override_color = normalized_color(node.get("type_color"))
+    if override_color is not None:
+        return override_color
     return NODE_COLORS.get(node.get("node_type"), QColor("#2563EB"))
 
 
@@ -549,10 +753,24 @@ def node_background_color(node: dict[str, Any]) -> QColor:
     status_background = STATUS_BACKGROUNDS.get(node.get("status"))
     if status_background is not None:
         return status_background
+    highlight_color = normalized_color(node.get("highlight_color"))
+    if highlight_color is not None:
+        return highlight_color.lighter(HIGHLIGHT_BACKGROUND_LIGHTNESS)
+    if node.get("is_collapsed"):
+        return QColor("#D1FAE5")
+    if node.get("is_root_folder"):
+        return ROOT_FOLDER_BACKGROUND
     return NODE_BACKGROUNDS.get(node.get("node_type"), QColor("#F8FAFC"))
 
 
-def node_icon_name(node: dict[str, Any]) -> str:
+def node_pen(node: dict[str, Any]) -> QPen:
+    pen = QPen(node_color(node), 3.0 if node.get("is_collapsed") else 2.0)
+    if node.get("is_collapsed"):
+        pen.setStyle(Qt.DashLine)
+    return pen
+
+
+def node_icon_name(node: dict[str, Any], overrides: dict[str, str] | None = None) -> str:
     status_icon = STATUS_ICON_NAMES.get(str(node.get("status") or "").upper())
     if status_icon is not None:
         return status_icon
@@ -561,11 +779,13 @@ def node_icon_name(node: dict[str, Any]) -> str:
         return "folder"
 
     extension = node_extension(node)
+    if overrides and extension in overrides:
+        return overrides[extension]
     return EXTENSION_ICON_NAMES.get(extension, "file")
 
 
-def node_icon_path(node: dict[str, Any]) -> Path:
-    icon_path = ASSETS_DIR / f"{node_icon_name(node)}.svg"
+def node_icon_path(node: dict[str, Any], overrides: dict[str, str] | None = None) -> Path:
+    icon_path = ASSETS_DIR / f"{node_icon_name(node, overrides)}.svg"
     if icon_path.exists():
         return icon_path
     return ASSETS_DIR / "file.svg"
@@ -582,6 +802,75 @@ def node_extension(node: dict[str, Any]) -> str:
     return ""
 
 
+def normalized_color(value: Any) -> QColor | None:
+    if not value:
+        return None
+    color = QColor(str(value))
+    return color if color.isValid() else None
+
+
+def normalize_extension_icon_overrides(overrides: dict[str, str]) -> dict[str, str]:
+    normalized: dict[str, str] = {}
+    for extension, icon_name in overrides.items():
+        extension_key = str(extension).strip().lower().removeprefix(".")
+        icon_key = str(icon_name).strip().lower()
+        if not extension_key or not icon_key:
+            continue
+        normalized[extension_key] = icon_key
+    return normalized
+
+
+def format_node_label(name: Any, *, max_line_length: int = NODE_LABEL_MAX_LINE_LENGTH) -> str:
+    raw_name = str(name or "")
+    if not raw_name:
+        return ""
+
+    suffix = PurePath(raw_name).suffix
+    stem = raw_name[: -len(suffix)] if suffix else raw_name
+    lines = natural_label_lines(stem, max_line_length=max_line_length)
+    if suffix:
+        if lines and len(lines[-1]) + len(suffix) <= max_line_length:
+            lines[-1] += suffix
+        else:
+            lines.append(suffix)
+    return "\n".join(line for line in lines if line) or raw_name
+
+
+def natural_label_lines(value: str, *, max_line_length: int) -> list[str]:
+    if not value:
+        return []
+
+    chunks = split_label_chunks(value)
+    lines: list[str] = []
+    current = ""
+    for chunk in chunks:
+        if not chunk:
+            continue
+        if current and len(current) + len(chunk) > max_line_length:
+            lines.append(current.rstrip())
+            current = chunk.lstrip()
+        else:
+            current += chunk
+    if current:
+        lines.append(current.rstrip())
+    return lines or [value]
+
+
+def split_label_chunks(value: str) -> list[str]:
+    parts = re.split(r"([ _-]+)", value)
+    chunks: list[str] = []
+    index = 0
+    while index < len(parts):
+        part = parts[index]
+        if index + 1 < len(parts) and re.fullmatch(r"[ _-]+", parts[index + 1] or ""):
+            chunks.append(part + parts[index + 1])
+            index += 2
+        else:
+            chunks.append(part)
+            index += 1
+    return chunks
+
+
 def edge_width(relation: dict[str, Any]) -> float:
     return STRENGTH_WIDTHS.get(str(relation.get("strength", "MEDIUM")).upper(), 2.0)
 
@@ -590,10 +879,143 @@ def clamp_label_font_size(point_size: int) -> int:
     return max(MIN_LABEL_FONT_SIZE, min(MAX_LABEL_FONT_SIZE, int(point_size)))
 
 
+def normalize_label_visibility_mode(mode: str) -> str:
+    return normalize_edge_label_visibility_mode(mode)
+
+
+def normalize_edge_label_visibility_mode(mode: str) -> str:
+    normalized = str(mode or "").strip().lower()
+    return normalized if normalized in LABEL_VISIBILITY_MODES else LABEL_VISIBILITY_HOVER
+
+
+def normalize_node_label_visibility_mode(mode: str) -> str:
+    normalized = str(mode or "").strip().lower()
+    if normalized == LABEL_VISIBILITY_ALWAYS:
+        return NODE_LABEL_MODE_ALL
+    return normalized if normalized in NODE_LABEL_VISIBILITY_MODES else NODE_LABEL_MODE_HOVER
+
+
+def node_label_visible_without_hover(node: dict[str, Any], mode: str) -> bool:
+    normalized = normalize_node_label_visibility_mode(mode)
+    node_type = str(node.get("node_type") or "").upper()
+    if normalized == NODE_LABEL_MODE_ALL:
+        return True
+    if normalized == NODE_LABEL_MODE_FOLDERS:
+        return node_type == "FOLDER"
+    if normalized == NODE_LABEL_MODE_FILES:
+        return node_type == "FILE"
+    return False
+
+
 def apply_label_font_size(text_item: QGraphicsTextItem, point_size: int) -> None:
     font = text_item.font()
     font.setPointSize(clamp_label_font_size(point_size))
     text_item.setFont(font)
+
+
+def label_candidate_positions(node_item: NodeItem) -> list[QPointF]:
+    label_rect = node_item.label_item.boundingRect()
+    width = label_rect.width()
+    height = label_rect.height()
+    radius = node_item.radius
+    gap = LABEL_NODE_GAP
+    return [
+        QPointF(-width / 2, radius + gap),
+        QPointF(-width / 2, -radius - gap - height),
+        QPointF(radius + gap, -height / 2),
+        QPointF(-radius - gap - width, -height / 2),
+    ]
+
+
+def label_collision_score(
+    node_item: NodeItem,
+    label_position: QPointF,
+    node_items: list[NodeItem],
+    edge_items: list[EdgeItem],
+) -> float:
+    label_rect = node_item.label_item.boundingRect()
+    local_rect = QRectF(label_position.x(), label_position.y(), label_rect.width(), label_rect.height())
+    scene_rect = node_item.mapToScene(local_rect).boundingRect()
+    score = 0.0
+
+    for other_node in node_items:
+        if other_node is node_item:
+            continue
+        score += rect_overlap_area(scene_rect, other_node.sceneBoundingRect()) * 4.0
+
+    center = scene_rect.center()
+    for edge_item in edge_items:
+        line = edge_item.line()
+        if point_to_segment_distance(center, line.x1(), line.y1(), line.x2(), line.y2()) < 12.0:
+            score += 500.0
+
+    return score
+
+
+def rect_overlap_area(first: QRectF, second: QRectF) -> float:
+    overlap = first.intersected(second)
+    if overlap.isNull():
+        return 0.0
+    return max(0.0, overlap.width()) * max(0.0, overlap.height())
+
+
+def point_to_segment_distance(point: QPointF, x1: float, y1: float, x2: float, y2: float) -> float:
+    dx = x2 - x1
+    dy = y2 - y1
+    length_squared = dx * dx + dy * dy
+    if length_squared <= 1e-6:
+        return math.hypot(point.x() - x1, point.y() - y1)
+
+    t = ((point.x() - x1) * dx + (point.y() - y1) * dy) / length_squared
+    t = max(0.0, min(1.0, t))
+    nearest_x = x1 + t * dx
+    nearest_y = y1 + t * dy
+    return math.hypot(point.x() - nearest_x, point.y() - nearest_y)
+
+
+def edge_label_offset(source: QPointF, target: QPointF) -> QPointF:
+    dx = target.x() - source.x()
+    dy = target.y() - source.y()
+    length = math.hypot(dx, dy)
+    if length < 1e-6:
+        return QPointF(EDGE_LABEL_OFFSET, -EDGE_LABEL_OFFSET)
+
+    px = -dy / length
+    py = dx / length
+    if py > 0 or (abs(py) < 1e-6 and px < 0):
+        px = -px
+        py = -py
+    return QPointF(px * EDGE_LABEL_OFFSET, py * EDGE_LABEL_OFFSET)
+
+
+def overlap_shift(moved_node: NodeItem, anchor_node: NodeItem) -> QPointF | None:
+    moved_position = moved_node.scenePos()
+    anchor_position = anchor_node.scenePos()
+    dx = moved_position.x() - anchor_position.x()
+    dy = moved_position.y() - anchor_position.y()
+    distance = math.hypot(dx, dy)
+    min_distance = moved_node.radius + anchor_node.radius + MANUAL_NODE_GAP
+    overlap = min_distance - distance
+    if overlap <= 0:
+        return None
+
+    if distance < 1e-6:
+        ux, uy = deterministic_unit_vector(
+            int(moved_node.node.get("node_id", 0)),
+            int(anchor_node.node.get("node_id", 0)),
+        )
+    else:
+        ux, uy = dx / distance, dy / distance
+    return QPointF(ux * overlap, uy * overlap)
+
+
+def deterministic_unit_vector(first_id: int, second_id: int) -> tuple[float, float]:
+    angle = ((first_id * 31 + second_id * 17) % 360) * math.pi / 180.0
+    return math.cos(angle), math.sin(angle)
+
+
+def manhattan_length(point: QPointF) -> float:
+    return abs(point.x()) + abs(point.y())
 
 
 def graph_fit_padding(rect: QRectF) -> float:

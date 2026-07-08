@@ -1,24 +1,26 @@
 from __future__ import annotations
 
 import os
+import csv
+import json
 import random
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QPoint, Qt
-from PySide6.QtGui import QAction
+from PySide6.QtCore import QObject, QPoint, QThread, Qt, Signal
+from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
+    QColorDialog,
     QDialog,
     QFileDialog,
-    QLineEdit,
+    QInputDialog,
     QMainWindow,
     QMenu,
     QMessageBox,
     QSplitter,
-    QStyle,
-    QToolBar,
 )
 
 from core.database_manager import DatabaseManager, DuplicateNodeError, DuplicateRelationError
@@ -30,34 +32,96 @@ from core.file_integrity import (
 )
 from core.graph_manager import GraphManager
 from gui.control_panel import ControlPanel
-from gui.graph_viewer import DEFAULT_LABEL_FONT_SIZE, GraphViewer, clamp_label_font_size
+from gui.graph_viewer import (
+    DEFAULT_LABEL_FONT_SIZE,
+    GraphViewer,
+    clamp_label_font_size,
+    normalize_edge_label_visibility_mode,
+    normalize_extension_icon_overrides,
+    normalize_node_label_visibility_mode,
+)
 from gui.relation_dialog import RelationDialog
+from gui.settings_dialog import SettingsDialog
 
 
-SKIPPED_RECURSIVE_DIR_NAMES = {
+DEFAULT_IGNORED_DIR_NAMES = (
     ".git",
     ".venv",
     "venv",
     "ENV",
     "node_modules",
     "__pycache__",
-}
+)
+SKIPPED_RECURSIVE_DIR_NAMES = set(DEFAULT_IGNORED_DIR_NAMES)
 
 DUPLICATE_NODE_FOCUS = "focus"
 DUPLICATE_NODE_RELATION = "relation"
 DUPLICATE_NODE_CANCEL = "cancel"
 GRAPH_LABEL_FONT_SIZE_SETTING = "graph_label_font_size"
+NODE_LABEL_MODE_SETTING = "graph_node_label_mode"
+NODE_LABEL_MODE_USER_SET_SETTING = "graph_node_label_mode_user_set"
+EDGE_LABEL_MODE_SETTING = "graph_edge_label_mode"
+IGNORED_DIR_NAMES_SETTING = "ignored_dir_names"
+AI_ENABLED_SETTING = "ai_enabled"
+GEMINI_MODEL_SETTING = "gemini_model"
+AI_API_KEY_SAVED_SETTING = "gemini_api_key_saved"
+EXTENSION_ICON_OVERRIDES_SETTING = "extension_icon_overrides"
+NODE_TYPE_COLORS_SETTING = "node_type_colors"
+HIGHLIGHT_COLOR_SLOTS_SETTING = "highlight_color_slots"
+DEFAULT_GEMINI_MODEL = "gemini-1.5-flash"
+DEFAULT_NODE_TYPE_COLORS = {
+    "FILE": "#2563EB",
+    "FOLDER": "#059669",
+}
+DEFAULT_HIGHLIGHT_COLOR_SLOTS = (
+    "#F97316",
+    "#EAB308",
+    "#22C55E",
+    "#06B6D4",
+    "#A855F7",
+)
+SEARCH_LAYOUT_SCALE = 420.0
+BACKGROUND_IMPORT_THRESHOLD = 500
+KEYRING_SERVICE_NAME = "FileGraph"
+KEYRING_GEMINI_API_USERNAME = "gemini_api_key"
 MAX_LAYOUT_SEED = 2_147_483_647
 NODE_CONTEXT_ADD_RELATION = "node_context_add_relation"
 NODE_CONTEXT_EDIT_RELATIONS = "node_context_edit_relations"
 NODE_CONTEXT_DELETE_NODE = "node_context_delete_node"
 NODE_CONTEXT_TOGGLE_CONTAINS = "node_context_toggle_contains"
+NODE_CONTEXT_OPEN_NODE = "node_context_open_node"
+NODE_CONTEXT_EDIT_NOTE = "node_context_edit_note"
+NODE_CONTEXT_HIGHLIGHT_NODE = "node_context_highlight_node"
+NODE_CONTEXT_CLEAR_HIGHLIGHT = "node_context_clear_highlight"
 
 
 @dataclass(frozen=True)
 class ImportPlan:
     entries: list[tuple[str, str]]
     contains_pairs: list[tuple[str, str]]
+
+
+class ImportWorker(QObject):
+    finished = Signal(dict)
+    failed = Signal(str)
+
+    def __init__(self, db_path: str | os.PathLike[str], import_plan: ImportPlan, action_label: str) -> None:
+        super().__init__()
+        self.db_path = db_path
+        self.import_plan = import_plan
+        self.action_label = action_label
+
+    def run(self) -> None:
+        database = DatabaseManager(self.db_path)
+        try:
+            database.init_db()
+            result = execute_import_plan(database, self.import_plan)
+            result["action_label"] = self.action_label
+            self.finished.emit(result)
+        except Exception as exc:  # pragma: no cover - depends on filesystem/database state.
+            self.failed.emit(str(exc))
+        finally:
+            database.close()
 
 
 class MainWindow(QMainWindow):
@@ -71,23 +135,46 @@ class MainWindow(QMainWindow):
         self.graph_manager = GraphManager(self.database)
         self.selected_node: dict[str, Any] | None = None
         self.collapsed_folder_node_ids: set[int] = set()
+        self.current_graph_data: dict[str, list[dict[str, Any]]] = {"nodes": [], "relations": []}
         self.graph_font_size = self._load_graph_font_size()
+        self.node_label_mode = self._load_node_label_mode()
+        self.edge_label_mode = self._load_edge_label_mode()
+        self.ignored_dir_names = self._load_ignored_dir_names()
+        self.extension_icon_overrides = self._load_json_setting(EXTENSION_ICON_OVERRIDES_SETTING, {})
+        self.node_type_colors = self._load_node_type_colors()
+        self.highlight_color_slots = self._load_highlight_color_slots()
+        self.ai_enabled = self._load_bool_setting(AI_ENABLED_SETTING, default=False)
+        self.gemini_model = self.database.get_setting(GEMINI_MODEL_SETTING, DEFAULT_GEMINI_MODEL) or DEFAULT_GEMINI_MODEL
+        self.api_key_saved = self._load_bool_setting(AI_API_KEY_SAVED_SETTING, default=False)
+        self.undo_stack: list[dict[str, Any]] = []
+        self.import_worker_thread: QThread | None = None
+        self.import_worker: ImportWorker | None = None
 
         self.graph_viewer = GraphViewer()
         self.graph_viewer.set_label_font_size(self.graph_font_size)
+        self.graph_viewer.set_label_visibility_modes(
+            node_mode=self.node_label_mode,
+            edge_mode=self.edge_label_mode,
+        )
+        self.graph_viewer.set_extension_icon_overrides(self.extension_icon_overrides)
         self.control_panel = ControlPanel()
         self.control_panel.set_graph_font_size(self.graph_font_size)
-        self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("파일명, 경로, 카테고리 검색")
-        self.search_input.setClearButtonEnabled(True)
-        self.search_input.setMinimumWidth(320)
+        self.control_panel.set_settings(
+            ignored_dir_names=sorted(self.ignored_dir_names),
+            node_label_mode=self.node_label_mode,
+            edge_label_mode=self.edge_label_mode,
+            ai_enabled=self.ai_enabled,
+            gemini_model=self.gemini_model,
+            api_key_saved=self.api_key_saved,
+            visual_settings=self.visual_settings(),
+        )
+        self.search_input = self.control_panel.search_input
 
-        self._build_toolbar()
         self._build_layout()
         self._connect_signals()
+        self._connect_shortcuts()
         self._apply_style()
 
-        self.scan_file_statuses()
         self.reload_graph()
 
     def closeEvent(self, event) -> None:
@@ -104,6 +191,60 @@ class MainWindow(QMainWindow):
         except ValueError:
             return DEFAULT_LABEL_FONT_SIZE
 
+    def _load_node_label_mode(self) -> str:
+        raw_value = self.database.get_setting(NODE_LABEL_MODE_SETTING, "hover") or "hover"
+        mode = normalize_node_label_visibility_mode(raw_value)
+        user_set = self._load_bool_setting(NODE_LABEL_MODE_USER_SET_SETTING, default=False)
+        if not user_set and mode in {"folders", "files"}:
+            return "hover"
+        return mode
+
+    def _load_edge_label_mode(self) -> str:
+        return normalize_edge_label_visibility_mode(self.database.get_setting(EDGE_LABEL_MODE_SETTING, "hover") or "hover")
+
+    def _load_ignored_dir_names(self) -> set[str]:
+        value = self.database.get_setting(IGNORED_DIR_NAMES_SETTING)
+        if value is None:
+            return set(DEFAULT_IGNORED_DIR_NAMES)
+        parsed = normalize_ignored_dir_names(value.split(","))
+        return parsed or set(DEFAULT_IGNORED_DIR_NAMES)
+
+    def _load_json_setting(self, setting_key: str, default: Any) -> Any:
+        value = self.database.get_setting(setting_key)
+        if not value:
+            return default
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return default
+
+    def _load_node_type_colors(self) -> dict[str, str]:
+        saved = self._load_json_setting(NODE_TYPE_COLORS_SETTING, {})
+        colors = dict(DEFAULT_NODE_TYPE_COLORS)
+        if isinstance(saved, dict):
+            for node_type, color in saved.items():
+                node_type_key = str(node_type).upper()
+                color_value = str(color).strip()
+                if node_type_key in colors and is_valid_color(color_value):
+                    colors[node_type_key] = color_value
+        return colors
+
+    def _load_highlight_color_slots(self) -> list[str]:
+        saved = self._load_json_setting(HIGHLIGHT_COLOR_SLOTS_SETTING, [])
+        colors = [str(color).strip() for color in saved if is_valid_color(str(color).strip())] if isinstance(saved, list) else []
+        return (colors or list(DEFAULT_HIGHLIGHT_COLOR_SLOTS))[:5]
+
+    def _load_bool_setting(self, setting_key: str, *, default: bool) -> bool:
+        value = self.database.get_setting(setting_key, "1" if default else "0")
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+    def visual_settings(self) -> dict[str, Any]:
+        return {
+            "extension_icon_overrides": self.extension_icon_overrides,
+            "node_type_colors": self.node_type_colors,
+            "highlight_color_slots": self.highlight_color_slots,
+        }
+
     def set_graph_font_size(self, point_size: int) -> None:
         self.graph_font_size = clamp_label_font_size(point_size)
         self.graph_viewer.set_label_font_size(self.graph_font_size)
@@ -111,40 +252,124 @@ class MainWindow(QMainWindow):
         self.database.set_setting(GRAPH_LABEL_FONT_SIZE_SETTING, str(self.graph_font_size))
         self.statusBar().showMessage(f"그래프 글자 크기 {self.graph_font_size}pt", 1200)
 
+    def set_node_label_mode(self, mode: str) -> None:
+        self.node_label_mode = normalize_node_label_visibility_mode(mode)
+        self.graph_viewer.set_label_visibility_modes(node_mode=self.node_label_mode)
+        self.database.set_setting(NODE_LABEL_MODE_SETTING, self.node_label_mode)
+        self.database.set_setting(NODE_LABEL_MODE_USER_SET_SETTING, "1")
+        self.statusBar().showMessage("노드 라벨 표시 방식을 저장했습니다.", 1500)
+
+    def set_edge_label_mode(self, mode: str) -> None:
+        self.edge_label_mode = normalize_edge_label_visibility_mode(mode)
+        self.graph_viewer.set_label_visibility_modes(edge_mode=self.edge_label_mode)
+        self.database.set_setting(EDGE_LABEL_MODE_SETTING, self.edge_label_mode)
+        self.statusBar().showMessage("간선 라벨 표시 방식을 저장했습니다.", 1500)
+
+    def set_ignored_dir_names(self, ignored_dir_names: list[str]) -> None:
+        self.ignored_dir_names = normalize_ignored_dir_names(ignored_dir_names) or set(DEFAULT_IGNORED_DIR_NAMES)
+        self.database.set_setting(IGNORED_DIR_NAMES_SETTING, ",".join(sorted(self.ignored_dir_names)))
+        self.statusBar().showMessage("무시 폴더 목록을 저장했습니다.", 1500)
+
+    def set_ai_settings(self, enabled: bool, gemini_model: str) -> None:
+        self.ai_enabled = bool(enabled)
+        self.gemini_model = gemini_model.strip() or DEFAULT_GEMINI_MODEL
+        self.database.set_setting(AI_ENABLED_SETTING, "1" if self.ai_enabled else "0")
+        self.database.set_setting(GEMINI_MODEL_SETTING, self.gemini_model)
+        self.statusBar().showMessage("AI 설정을 저장했습니다.", 1500)
+
+    def set_visual_settings(self, settings: dict[str, Any]) -> None:
+        node_colors = settings.get("node_type_colors") or {}
+        updated_node_colors = dict(DEFAULT_NODE_TYPE_COLORS)
+        for node_type, color in node_colors.items():
+            node_type_key = str(node_type).upper()
+            color_value = str(color).strip()
+            if node_type_key in updated_node_colors and is_valid_color(color_value):
+                updated_node_colors[node_type_key] = color_value
+
+        highlight_slots = [
+            str(color).strip()
+            for color in settings.get("highlight_color_slots", [])
+            if is_valid_color(str(color).strip())
+        ][:5]
+
+        icon_overrides = self.extension_icon_overrides
+        if "extension_icon_overrides" in settings:
+            icon_overrides = normalize_extension_icon_overrides(settings.get("extension_icon_overrides") or {})
+
+        self.node_type_colors = updated_node_colors
+        self.highlight_color_slots = highlight_slots or list(DEFAULT_HIGHLIGHT_COLOR_SLOTS)
+        self.extension_icon_overrides = icon_overrides
+        self.graph_viewer.set_extension_icon_overrides(self.extension_icon_overrides)
+        self.database.set_setting(NODE_TYPE_COLORS_SETTING, json.dumps(self.node_type_colors, ensure_ascii=False))
+        self.database.set_setting(HIGHLIGHT_COLOR_SLOTS_SETTING, json.dumps(self.highlight_color_slots, ensure_ascii=False))
+        self.database.set_setting(
+            EXTENSION_ICON_OVERRIDES_SETTING,
+            json.dumps(self.extension_icon_overrides, ensure_ascii=False),
+        )
+        self.control_panel.set_visual_settings(self.visual_settings())
+        self.reload_graph()
+        self.statusBar().showMessage("색상과 아이콘 설정을 저장했습니다.", 1500)
+
+    def settings_dialog_payload(self) -> dict[str, Any]:
+        return {
+            "graph_font_size": self.graph_font_size,
+            "node_label_mode": self.node_label_mode,
+            "edge_label_mode": self.edge_label_mode,
+            "ignored_dir_names": sorted(self.ignored_dir_names),
+            "ai_enabled": self.ai_enabled,
+            "gemini_model": self.gemini_model,
+            "api_key_saved": self.api_key_saved,
+            **self.visual_settings(),
+        }
+
+    def show_settings_dialog(self) -> None:
+        dialog = SettingsDialog(self.settings_dialog_payload(), self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        values = dialog.values()
+        self.set_graph_font_size(values["graph_font_size"])
+        self.set_node_label_mode(values["node_label_mode"])
+        self.set_edge_label_mode(values["edge_label_mode"])
+        self.set_ignored_dir_names(values["ignored_dir_names"])
+        self.set_ai_settings(values["ai_enabled"], values["gemini_model"])
+        self.set_visual_settings(values["visual_settings"])
+        if values.get("delete_api_key"):
+            self.delete_gemini_api_key()
+        if values.get("api_key_to_save"):
+            self.save_gemini_api_key(values["api_key_to_save"])
+        self.statusBar().showMessage("설정을 저장했습니다.", 1800)
+
+    def save_gemini_api_key(self, api_key: str) -> None:
+        try:
+            import keyring
+
+            keyring.set_password(KEYRING_SERVICE_NAME, KEYRING_GEMINI_API_USERNAME, api_key)
+        except Exception as exc:  # pragma: no cover - depends on the user's keyring backend.
+            QMessageBox.warning(self, "API 키 저장 실패", f"keyring에 API 키를 저장하지 못했습니다.\n{exc}")
+            return
+
+        self.api_key_saved = True
+        self.database.set_setting(AI_API_KEY_SAVED_SETTING, "1")
+        self.control_panel.set_api_key_saved(True)
+        self.statusBar().showMessage("API 키를 keyring에 저장했습니다.", 1500)
+
+    def delete_gemini_api_key(self) -> None:
+        try:
+            import keyring
+
+            keyring.delete_password(KEYRING_SERVICE_NAME, KEYRING_GEMINI_API_USERNAME)
+        except Exception:
+            pass
+
+        self.api_key_saved = False
+        self.database.set_setting(AI_API_KEY_SAVED_SETTING, "0")
+        self.control_panel.set_api_key_saved(False)
+        self.statusBar().showMessage("API 키 저장 상태를 삭제했습니다.", 1500)
+
     def next_layout_seed(self) -> int:
         # Layout seed is not security-sensitive.
         return random.randint(1, MAX_LAYOUT_SEED)  # nosec B311
-
-    def _build_toolbar(self) -> None:
-        toolbar = QToolBar("Main")
-        toolbar.setMovable(False)
-        toolbar.setIconSize(self.style().standardIcon(QStyle.SP_FileIcon).actualSize(toolbar.iconSize()))
-        self.addToolBar(toolbar)
-
-        add_file = QAction(self.style().standardIcon(QStyle.SP_FileIcon), "파일 추가", self)
-        add_file.triggered.connect(self.add_file_node)
-        toolbar.addAction(add_file)
-
-        add_folder = QAction(self.style().standardIcon(QStyle.SP_DirIcon), "폴더 추가", self)
-        add_folder.triggered.connect(self.add_folder_node)
-        toolbar.addAction(add_folder)
-
-        toolbar.addSeparator()
-
-        add_relation = QAction(self.style().standardIcon(QStyle.SP_ArrowRight), "관계 추가", self)
-        add_relation.triggered.connect(self.add_relation)
-        toolbar.addAction(add_relation)
-
-        toolbar.addSeparator()
-        toolbar.addWidget(self.search_input)
-
-        search_action = QAction(self.style().standardIcon(QStyle.SP_FileDialogContentsView), "검색", self)
-        search_action.triggered.connect(self.search_nodes)
-        toolbar.addAction(search_action)
-
-        clear_action = QAction(self.style().standardIcon(QStyle.SP_DialogResetButton), "전체 보기", self)
-        clear_action.triggered.connect(self.show_full_graph)
-        toolbar.addAction(clear_action)
 
     def _build_layout(self) -> None:
         splitter = QSplitter(Qt.Horizontal)
@@ -156,17 +381,24 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(splitter)
 
     def _connect_signals(self) -> None:
-        self.search_input.returnPressed.connect(self.search_nodes)
         self.graph_viewer.nodeSelected.connect(self.on_node_selected)
         self.graph_viewer.nodeActivated.connect(self.open_node)
         self.graph_viewer.nodeContextMenuRequested.connect(self.show_node_context_menu)
         self.graph_viewer.nodeMoved.connect(self.on_node_moved)
         self.graph_viewer.pathsDropped.connect(self.add_dropped_paths)
+        self.graph_viewer.selectedNodesChanged.connect(self.on_selected_nodes_changed)
+        self.control_panel.addFileRequested.connect(self.add_file_node)
+        self.control_panel.addFolderRequested.connect(self.add_folder_node)
+        self.control_panel.settingsRequested.connect(self.show_settings_dialog)
+        self.control_panel.searchRequested.connect(self.search_nodes)
+        self.control_panel.searchTextChanged.connect(self.update_search_suggestions)
+        self.control_panel.searchSuggestionActivated.connect(self.focus_search_suggestion)
         self.control_panel.refreshRequested.connect(self.reload_graph)
         self.control_panel.checkFilesRequested.connect(self.refresh_file_statuses)
         self.control_panel.locateMissingRequested.connect(self.locate_missing_files)
         self.control_panel.addRelationRequested.connect(self.add_relation)
         self.control_panel.deleteNodeRequested.connect(self.delete_node_or_selection)
+        self.control_panel.deleteSelectedNodesRequested.connect(self.delete_selected_nodes_from_panel)
         self.control_panel.focusDepthRequested.connect(self.show_focus_graph)
         self.control_panel.fullViewRequested.connect(self.show_full_graph)
         self.control_panel.editRelationRequested.connect(self.edit_relation)
@@ -174,44 +406,272 @@ class MainWindow(QMainWindow):
         self.control_panel.graphFontSizeChanged.connect(self.set_graph_font_size)
         self.control_panel.sampleDataRequested.connect(self.create_sample_data)
         self.control_panel.resetLayoutRequested.connect(self.reset_layout)
+        self.control_panel.ignoredFoldersChanged.connect(self.set_ignored_dir_names)
+        self.control_panel.nodeLabelModeChanged.connect(self.set_node_label_mode)
+        self.control_panel.edgeLabelModeChanged.connect(self.set_edge_label_mode)
+        self.control_panel.aiSettingsChanged.connect(self.set_ai_settings)
+        self.control_panel.visualSettingsChanged.connect(self.set_visual_settings)
+        self.control_panel.apiKeySaveRequested.connect(self.save_gemini_api_key)
+        self.control_panel.apiKeyDeleteRequested.connect(self.delete_gemini_api_key)
+
+    def _connect_shortcuts(self) -> None:
+        self.shortcuts: list[QShortcut] = []
+        shortcut_map = {
+            "Ctrl+F": self.focus_search_input,
+            "Esc": self.clear_search_or_selection,
+            "Delete": self.delete_selected_nodes_from_panel,
+            "Return": self.open_selected_node,
+            "Enter": self.open_selected_node,
+            "Ctrl+L": self.reset_layout,
+            "Ctrl+R": self.reload_graph,
+            "Ctrl+Shift+R": self.refresh_file_statuses,
+            "F": lambda: self.show_focus_graph(self.control_panel.focus_depth_input.value()),
+            "Shift+F": self.show_full_graph,
+            "Ctrl+N": self.add_file_node,
+            "Ctrl+Shift+N": self.add_folder_node,
+            "Ctrl+Z": self.undo_last_action,
+            "F1": self.show_shortcut_help,
+            "Ctrl+Shift+L": self.show_legend,
+            "Ctrl+Shift+O": self.show_orphan_nodes,
+            "Ctrl+Shift+D": self.show_duplicate_candidates,
+            "Ctrl+Shift+B": self.backup_database_file,
+            "Ctrl+Shift+E": self.export_graph_json,
+        }
+        for sequence, callback in shortcut_map.items():
+            shortcut = QShortcut(QKeySequence(sequence), self)
+            shortcut.activated.connect(callback)
+            self.shortcuts.append(shortcut)
 
     def show_full_graph(self) -> None:
+        self.control_panel.clear_search()
         self.reload_graph()
         self.statusBar().showMessage("전체 그래프를 표시합니다.", 2500)
 
+    def focus_search_input(self) -> None:
+        self.search_input.setFocus(Qt.ShortcutFocusReason)
+        self.search_input.selectAll()
+
+    def clear_search_or_selection(self) -> None:
+        if self.control_panel.search_text():
+            self.control_panel.clear_search()
+            self.reload_graph()
+            return
+        self.graph_viewer.scene.clearSelection()
+        self.selected_node = None
+        self.control_panel.show_node(None)
+        self.control_panel.set_selected_node_count(0)
+
+    def open_selected_node(self) -> None:
+        node = self.selected_node
+        selected_ids = self.graph_viewer.selected_node_ids()
+        if selected_ids:
+            node = self.database.get_node(selected_ids[0])
+        if node is not None:
+            self.open_node(node)
+
+    def show_shortcut_help(self) -> None:
+        QMessageBox.information(
+            self,
+            "단축키",
+            "\n".join(
+                [
+                    "Ctrl+F: 검색창으로 이동",
+                    "Esc: 검색/선택 해제",
+                    "Delete: 선택 노드 삭제",
+                    "Enter: 선택 노드 열기",
+                    "Ctrl+L: 자동 정렬",
+                    "Ctrl+R: 그래프 새로고침",
+                    "Ctrl+Shift+R: 파일 위치 갱신",
+                    "F: 선택 노드 포커스 보기",
+                    "Shift+F: 전체 보기",
+                    "Ctrl+N: 파일 추가",
+                    "Ctrl+Shift+N: 폴더 추가",
+                    "Ctrl+Z: 되돌리기",
+                    "Ctrl+Shift+L: 범례 보기",
+                    "Ctrl+Shift+O: 고립 노드 보기",
+                    "Ctrl+Shift+D: 중복 후보 보기",
+                    "Ctrl+Shift+B: DB 백업",
+                    "Ctrl+Shift+E: JSON 내보내기",
+                ]
+            ),
+        )
+
+    def show_legend(self) -> None:
+        QMessageBox.information(
+            self,
+            "범례",
+            "\n".join(
+                [
+                    "회색: 누락 파일",
+                    "빨강: 접근 거부",
+                    "초록 점선: 접힌 폴더",
+                    "주황 테두리: 상위 폴더가 없는 루트 폴더",
+                    "파랑: 파일",
+                    "초록: 폴더",
+                    "간선 색상: 관계 타입 색상",
+                    "노드 우상단 점: 메모 있음",
+                ]
+            ),
+        )
+
+    def show_orphan_nodes(self) -> None:
+        nodes = self.database.list_orphan_nodes()
+        data = self.graph_manager.get_graph_data(
+            nodes=nodes,
+            relations=[],
+            scale=SEARCH_LAYOUT_SCALE,
+            use_saved_layout=False,
+        )
+        data = self.prepare_graph_data(data)
+        self.current_graph_data = data
+        self.graph_viewer.render_graph(data)
+        self.control_panel.set_summary(len(data["nodes"]), 0)
+        self.control_panel.show_node(None)
+        self.control_panel.show_relations([])
+        self.statusBar().showMessage(f"고립 노드 {len(nodes)}개를 표시합니다.", 2500)
+
+    def show_duplicate_candidates(self) -> None:
+        groups = self.database.list_duplicate_candidate_groups()
+        if not groups:
+            QMessageBox.information(self, "중복 후보", "중복 후보가 없습니다.")
+            return
+        lines = []
+        for group in groups[:20]:
+            nodes = group.get("nodes", [])
+            names = ", ".join(str(node.get("name", "")) for node in nodes[:4])
+            if len(nodes) > 4:
+                names += f" 외 {len(nodes) - 4}개"
+            lines.append(f"{group.get('kind')} · {group.get('value')} · {len(nodes)}개: {names}")
+        QMessageBox.information(self, "중복 후보", "\n".join(lines))
+
+    def backup_database_file(self) -> None:
+        if str(self.database.db_path) == ":memory:":
+            QMessageBox.information(self, "DB 백업", "메모리 DB는 백업할 수 없습니다.")
+            return
+        default_path = Path(self.database.db_path).with_suffix(".backup.db")
+        target_path, _filter = QFileDialog.getSaveFileName(self, "DB 백업", str(default_path), "SQLite DB (*.db)")
+        if not target_path:
+            return
+        self.database.conn.commit()
+        shutil.copy2(self.database.db_path, target_path)
+        self.statusBar().showMessage(f"DB를 백업했습니다: {target_path}", 3500)
+
+    def export_graph_json(self) -> None:
+        target_path, _filter = QFileDialog.getSaveFileName(self, "JSON 내보내기", "filegraph_export.json", "JSON (*.json)")
+        if not target_path:
+            return
+        payload = {
+            "nodes": self.database.list_nodes(include_deleted=True),
+            "relations": self.database.list_relations(include_deleted=True),
+            "relation_types": self.database.list_relation_types(include_inactive=True),
+        }
+        Path(target_path).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.statusBar().showMessage(f"JSON으로 내보냈습니다: {target_path}", 3500)
+
+    def export_graph_csv(self) -> None:
+        target_dir = QFileDialog.getExistingDirectory(self, "CSV 내보내기 폴더")
+        if not target_dir:
+            return
+        write_csv(Path(target_dir) / "nodes.csv", self.database.list_nodes(include_deleted=True))
+        write_csv(Path(target_dir) / "relations.csv", self.database.list_relations(include_deleted=True))
+        self.statusBar().showMessage(f"CSV로 내보냈습니다: {target_dir}", 3500)
+
+    def push_undo(self, action: dict[str, Any]) -> None:
+        self.undo_stack.append(action)
+        del self.undo_stack[:-30]
+
+    def undo_last_action(self) -> None:
+        if not self.undo_stack:
+            self.statusBar().showMessage("되돌릴 작업이 없습니다.", 1500)
+            return
+
+        action = self.undo_stack.pop()
+        kind = action.get("kind")
+        if kind == "node_delete":
+            for node_id, status in action.get("nodes", {}).items():
+                self.database.update_node_status(int(node_id), str(status or "ACTIVE"))
+            self.reload_graph()
+            self.statusBar().showMessage("노드 삭제를 되돌렸습니다.", 1800)
+            return
+        if kind == "relation_delete":
+            relation = action.get("relation") or {}
+            try:
+                self.database.add_relation(
+                    int(relation["source_id"]),
+                    int(relation["target_id"]),
+                    relation_type_id=int(relation["relation_type_id"]),
+                    is_directional=bool(relation.get("is_directional")),
+                    strength=relation.get("strength") or "MEDIUM",
+                    created_by=relation.get("created_by") or "USER",
+                    description=relation.get("description"),
+                )
+            except (DuplicateRelationError, KeyError, ValueError):
+                pass
+            self.reload_graph()
+            self.statusBar().showMessage("관계 삭제를 되돌렸습니다.", 1800)
+            return
+        if kind == "layout":
+            for node_id, position in action.get("positions", {}).items():
+                x, y = position
+                self.database.update_node_layout(int(node_id), x, y)
+            self.reload_graph()
+            self.statusBar().showMessage("자동 정렬을 되돌렸습니다.", 1800)
+            return
+
+        self.statusBar().showMessage("되돌릴 수 없는 작업입니다.", 1800)
+
     def reload_graph(self) -> None:
         data = self.graph_manager.get_graph_data()
-        data = self.apply_collapsed_folders(data)
+        data = self.prepare_graph_data(data)
+        self.current_graph_data = data
         self.graph_viewer.render_graph(data)
+        self.control_panel.set_selected_node_count(len(self.graph_viewer.selected_node_ids()))
         self.control_panel.set_summary(len(data["nodes"]), len(data["relations"]))
         if self.selected_node:
             refreshed = self.database.get_node(self.selected_node["node_id"])
             if refreshed and refreshed.get("status") != "DELETED":
                 self.selected_node = refreshed
                 self.control_panel.show_node(refreshed)
-                self.control_panel.show_relations(self.database.list_relations(node_id=refreshed["node_id"]))
+                self.control_panel.show_relations(
+                    relations_for_node_in_graph_data(data, refreshed["node_id"])
+                )
             else:
                 self.selected_node = None
                 self.control_panel.show_node(None)
-                self.control_panel.show_relations(self.database.list_relations())
+                self.control_panel.show_relations(data["relations"])
         else:
             self.control_panel.show_node(None)
-            self.control_panel.show_relations(self.database.list_relations())
+            self.control_panel.show_relations(data["relations"])
         self.statusBar().showMessage("그래프를 불러왔습니다.", 2500)
 
     def apply_collapsed_folders(self, data: dict[str, list[dict[str, Any]]]) -> dict[str, list[dict[str, Any]]]:
         if not self.collapsed_folder_node_ids:
             return data
 
-        hidden_node_ids = collapsed_contained_file_node_ids(data, self.collapsed_folder_node_ids)
-        if not hidden_node_ids:
+        collapsed_file_counts = {
+            folder_id: len(self.contained_file_node_ids(folder_id))
+            for folder_id in self.collapsed_folder_node_ids
+        }
+        collapsed_file_counts = {
+            folder_id: count
+            for folder_id, count in collapsed_file_counts.items()
+            if count > 0
+        }
+        if not collapsed_file_counts:
             return data
 
-        visible_nodes = [
-            node
-            for node in data.get("nodes", [])
-            if int(node["node_id"]) not in hidden_node_ids
-        ]
+        hidden_node_ids = collapsed_contained_file_node_ids(data, self.collapsed_folder_node_ids)
+        visible_nodes = []
+        for node in data.get("nodes", []):
+            node_id = int(node["node_id"])
+            if node_id in hidden_node_ids:
+                continue
+            visible_node = dict(node)
+            if node_id in collapsed_file_counts:
+                visible_node["is_collapsed"] = True
+                visible_node["collapsed_file_count"] = collapsed_file_counts[node_id]
+            visible_nodes.append(visible_node)
+
         visible_node_ids = {int(node["node_id"]) for node in visible_nodes}
         visible_relations = [
             relation
@@ -220,6 +680,34 @@ class MainWindow(QMainWindow):
             and int(relation["target_id"]) in visible_node_ids
         ]
         return {"nodes": visible_nodes, "relations": visible_relations}
+
+    def prepare_graph_data(self, data: dict[str, list[dict[str, Any]]]) -> dict[str, list[dict[str, Any]]]:
+        prepared = self.apply_collapsed_folders(data)
+        nodes = []
+        for node in prepared.get("nodes", []):
+            rendered = dict(node)
+            rendered["type_color"] = self.node_type_colors.get(str(rendered.get("node_type") or "").upper())
+            nodes.append(rendered)
+        return {"nodes": nodes, "relations": prepared.get("relations", [])}
+
+    def nodes_with_parent_folder_names(self) -> list[dict[str, Any]]:
+        nodes = self.database.list_nodes()
+        nodes_by_id = {int(node["node_id"]): node for node in nodes}
+        parent_names: dict[int, str] = {}
+        for relation in self.database.list_relations():
+            if relation.get("relation_type_code") != "CONTAINS":
+                continue
+            source = nodes_by_id.get(int(relation["source_id"]))
+            target = nodes_by_id.get(int(relation["target_id"]))
+            if source is None or target is None:
+                continue
+            if source.get("node_type") != "FOLDER":
+                continue
+            parent_names.setdefault(int(target["node_id"]), str(source.get("name") or ""))
+        return [
+            {**node, "parent_folder_name": parent_names.get(int(node["node_id"]), "")}
+            for node in nodes
+        ]
 
     def scan_file_statuses(self) -> IntegrityScanResult:
         return scan_database_file_statuses(self.database)
@@ -236,12 +724,17 @@ class MainWindow(QMainWindow):
         self.rediscover_missing_files([folder_path])
 
     def rediscover_missing_files(self, search_roots: list[str | os.PathLike[str]]) -> RediscoveryResult:
-        result = rediscover_missing_nodes(self.database, search_roots)
+        result = rediscover_missing_nodes(
+            self.database,
+            search_roots,
+            ignored_dir_names=self.ignored_dir_names,
+        )
         self.reload_graph()
         self.statusBar().showMessage(rediscovery_status_message(result), 3500)
         return result
 
     def show_focus_graph(self, depth: int) -> None:
+        depth = max(0, int(depth))
         if not self.selected_node:
             QMessageBox.information(self, "포커스 보기", "먼저 노드를 선택해 주세요.")
             return
@@ -255,15 +748,18 @@ class MainWindow(QMainWindow):
 
         self.selected_node = node
         data = self.graph_manager.get_focus_graph_data(node["node_id"], depth=depth)
+        data = self.prepare_graph_data(data)
+        self.current_graph_data = data
         self.graph_viewer.render_graph(data)
         self.graph_viewer.focus_node(node["node_id"])
+        self.control_panel.set_selected_node_count(len(self.graph_viewer.selected_node_ids()))
         self.control_panel.set_summary(len(data["nodes"]), len(data["relations"]))
         self.control_panel.show_node(node)
-        self.control_panel.show_relations(self.database.list_relations(node_id=node["node_id"]))
+        self.control_panel.show_relations(relations_for_node_in_graph_data(data, node["node_id"]))
         self.statusBar().showMessage(f"{node['name']} 기준 {depth}단계 포커스 보기", 2500)
 
-    def search_nodes(self) -> None:
-        query = self.search_input.text().strip()
+    def search_nodes(self, query: str | None = None) -> None:
+        query = self.control_panel.search_text() if query is None else query.strip()
         if not query:
             self.reload_graph()
             return
@@ -275,19 +771,48 @@ class MainWindow(QMainWindow):
             for relation in self.database.list_relations()
             if relation["source_id"] in node_ids and relation["target_id"] in node_ids
         ]
-        data = self.graph_manager.get_graph_data(nodes=nodes, relations=relations)
+        data = self.graph_manager.get_graph_data(
+            nodes=nodes,
+            relations=relations,
+            scale=SEARCH_LAYOUT_SCALE,
+            use_saved_layout=False,
+        )
+        data = self.prepare_graph_data(data)
+        self.current_graph_data = data
         self.graph_viewer.render_graph(data)
+        self.control_panel.set_selected_node_count(len(self.graph_viewer.selected_node_ids()))
         self.control_panel.set_summary(len(data["nodes"]), len(data["relations"]))
-        self.control_panel.show_relations(relations)
-        self.statusBar().showMessage(f"검색 결과 {len(nodes)}개", 2500)
-        if len(nodes) == 1:
-            self.selected_node = nodes[0]
-            self.control_panel.show_node(nodes[0])
-            self.control_panel.show_relations(self.database.list_relations(node_id=nodes[0]["node_id"]))
-            self.graph_viewer.focus_node(nodes[0]["node_id"])
+        self.control_panel.show_relations(data["relations"])
+        visible_nodes = data["nodes"]
+        self.statusBar().showMessage(f"검색 결과 {len(visible_nodes)}개", 2500)
+        if len(visible_nodes) == 1:
+            node = self.database.get_node(visible_nodes[0]["node_id"]) or visible_nodes[0]
+            self.selected_node = node
+            self.control_panel.show_node(node)
+            self.control_panel.show_relations(relations_for_node_in_graph_data(data, node["node_id"]))
+            self.graph_viewer.focus_node(node["node_id"])
+            self.control_panel.set_selected_node_count(len(self.graph_viewer.selected_node_ids()))
         else:
             self.selected_node = None
             self.control_panel.show_node(None)
+
+    def update_search_suggestions(self, query: str) -> None:
+        query = query.strip()
+        if len(query) < 2:
+            self.control_panel.set_search_suggestions([])
+            return
+        self.control_panel.set_search_suggestions(self.database.search_nodes(query, limit=8))
+
+    def focus_search_suggestion(self, node_id: int) -> None:
+        node = self.database.get_node(node_id)
+        if node is None or node.get("status") == "DELETED":
+            self.control_panel.set_search_suggestions([])
+            return
+        self.selected_node = node
+        self.control_panel.search_input.setText(node.get("name", ""))
+        self.control_panel.set_search_suggestions([])
+        self.search_nodes(node.get("name", ""))
+        self.graph_viewer.focus_node(node_id)
 
     def add_file_node(self) -> None:
         file_path, _filter = QFileDialog.getOpenFileName(self, "파일 추가")
@@ -297,7 +822,7 @@ class MainWindow(QMainWindow):
     def add_folder_node(self) -> None:
         folder_path = QFileDialog.getExistingDirectory(self, "폴더 추가")
         if folder_path:
-            include_folder_contents = self.ask_folder_import_options(folder_count=1)
+            include_folder_contents = self.ask_folder_import_options_for_paths([folder_path], folder_count=1)
             if include_folder_contents is None:
                 return
             self._add_import_paths(
@@ -310,7 +835,7 @@ class MainWindow(QMainWindow):
         folder_count = count_folder_paths(paths)
         include_folder_contents = False
         if folder_count:
-            selected = self.ask_folder_import_options(folder_count=folder_count)
+            selected = self.ask_folder_import_options_for_paths(paths, folder_count=folder_count)
             if selected is None:
                 self.statusBar().showMessage("드롭한 경로 추가를 취소했습니다.", 2500)
                 return
@@ -322,14 +847,33 @@ class MainWindow(QMainWindow):
             action_label="드롭한 경로",
         )
 
-    def ask_folder_import_options(self, *, folder_count: int) -> bool | None:
+    def ask_folder_import_options_for_paths(self, paths: list[str], *, folder_count: int) -> bool | None:
+        try:
+            return self.ask_folder_import_options(folder_count=folder_count, paths=paths)
+        except TypeError:
+            return self.ask_folder_import_options(folder_count=folder_count)
+
+    def ask_folder_import_options(self, *, folder_count: int, paths: list[str] | None = None) -> bool | None:
         message_box = QMessageBox(self)
         message_box.setWindowTitle("폴더 추가")
         message_box.setIcon(QMessageBox.Question)
         message_box.setText(f"폴더 {folder_count}개를 노드로 추가합니다.")
-        message_box.setInformativeText("내부 파일까지 함께 노드로 등록하려면 아래 옵션을 켜세요.")
+        informative_text = "하위 파일 자동 등록이 기본으로 켜져 있습니다. 원하지 않으면 옵션을 끄세요."
+        if paths:
+            preview_plan = build_import_plan(
+                paths,
+                include_folder_contents=True,
+                ignored_dir_names=self.ignored_dir_names,
+            )
+            file_count = sum(1 for _path, node_type in preview_plan.entries if node_type == "FILE")
+            folder_node_count = sum(1 for _path, node_type in preview_plan.entries if node_type == "FOLDER")
+            informative_text += (
+                f"\n미리보기: 폴더 {folder_node_count}개, 파일 {file_count}개, "
+                f"포함 관계 {len(preview_plan.contains_pairs)}개"
+            )
+        message_box.setInformativeText(informative_text)
         include_files_check = QCheckBox("내부 파일도 등록")
-        include_files_check.setChecked(False)
+        include_files_check.setChecked(True)
         message_box.setCheckBox(include_files_check)
         message_box.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
         message_box.setDefaultButton(QMessageBox.Ok)
@@ -349,20 +893,21 @@ class MainWindow(QMainWindow):
         node_ids_by_path: dict[str, int] = {}
         duplicate_count = 0
         first_duplicate: dict[str, Any] | None = None
-        import_plan = build_import_plan(paths, include_folder_contents=include_folder_contents)
+        import_plan = build_import_plan(
+            paths,
+            include_folder_contents=include_folder_contents,
+            ignored_dir_names=self.ignored_dir_names,
+        )
+        if self.should_import_in_background(import_plan):
+            self.start_background_import(import_plan, action_label=action_label)
+            return
 
-        for path, node_type in import_plan.entries:
-            try:
-                node_id = self.database.add_node(path, node_type=node_type)
-                added_ids.append(node_id)
-            except DuplicateNodeError as exc:
-                duplicate_count += 1
-                if first_duplicate is None:
-                    first_duplicate = exc.existing_node
-                node_id = int(exc.existing_node["node_id"])
-            node_ids_by_path[path] = node_id
-
-        contains_relation_count = self._add_default_contains_relations(import_plan.contains_pairs, node_ids_by_path)
+        result = execute_import_plan(self.database, import_plan)
+        added_ids = result["added_ids"]
+        node_ids_by_path = result["node_ids_by_path"]
+        duplicate_count = result["duplicate_count"]
+        first_duplicate = result["first_duplicate"]
+        contains_relation_count = result["contains_relation_count"]
 
         if not added_ids and contains_relation_count == 0:
             if duplicate_count:
@@ -391,6 +936,53 @@ class MainWindow(QMainWindow):
         if duplicate_count:
             message += f" 중복 {duplicate_count}개는 건너뛰었습니다."
         self.statusBar().showMessage(message, 3500)
+
+    def should_import_in_background(self, import_plan: ImportPlan) -> bool:
+        return (
+            len(import_plan.entries) >= BACKGROUND_IMPORT_THRESHOLD
+            and str(self.database.db_path) != ":memory:"
+            and self.import_worker_thread is None
+        )
+
+    def start_background_import(self, import_plan: ImportPlan, *, action_label: str) -> None:
+        self.import_worker_thread = QThread(self)
+        self.import_worker = ImportWorker(self.database.db_path, import_plan, action_label)
+        self.import_worker.moveToThread(self.import_worker_thread)
+        self.import_worker_thread.started.connect(self.import_worker.run)
+        self.import_worker.finished.connect(self.on_background_import_finished)
+        self.import_worker.failed.connect(self.on_background_import_failed)
+        self.import_worker.finished.connect(self.import_worker_thread.quit)
+        self.import_worker.failed.connect(self.import_worker_thread.quit)
+        self.import_worker_thread.finished.connect(self.clear_background_import_worker)
+        self.import_worker_thread.start()
+        self.statusBar().showMessage(f"{action_label} {len(import_plan.entries)}개를 백그라운드에서 추가합니다.", 3500)
+
+    def on_background_import_finished(self, result: dict[str, Any]) -> None:
+        self.reload_graph()
+        selected_id = result.get("selected_id")
+        if selected_id is not None:
+            self.graph_viewer.focus_node(int(selected_id))
+            self.selected_node = self.database.get_node(int(selected_id))
+            self.control_panel.show_node(self.selected_node)
+            self.control_panel.show_relations(self.database.list_relations(node_id=int(selected_id)))
+        action_label = result.get("action_label", "경로")
+        message = f"{action_label} {len(result.get('added_ids', []))}개 추가 완료"
+        contains_relation_count = int(result.get("contains_relation_count") or 0)
+        duplicate_count = int(result.get("duplicate_count") or 0)
+        if contains_relation_count:
+            message += f", 포함 관계 {contains_relation_count}개"
+        if duplicate_count:
+            message += f", 중복 {duplicate_count}개 건너뜀"
+        self.statusBar().showMessage(message, 4500)
+
+    def on_background_import_failed(self, message: str) -> None:
+        QMessageBox.warning(self, "백그라운드 추가 실패", message)
+
+    def clear_background_import_worker(self) -> None:
+        self.import_worker = None
+        if self.import_worker_thread is not None:
+            self.import_worker_thread.deleteLater()
+        self.import_worker_thread = None
 
     def _add_default_contains_relations(
         self,
@@ -462,7 +1054,9 @@ class MainWindow(QMainWindow):
         self.reload_graph()
         self.graph_viewer.focus_node(refreshed["node_id"])
         self.control_panel.show_node(refreshed)
-        self.control_panel.show_relations(self.database.list_relations(node_id=refreshed["node_id"]))
+        self.control_panel.show_relations(
+            relations_for_node_in_graph_data(self.current_graph_data, refreshed["node_id"])
+        )
 
     def create_sample_data(self) -> None:
         sample_root = Path.cwd() / "sample_workspace"
@@ -500,16 +1094,21 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("샘플 그래프를 만들었습니다.", 3000)
 
     def reset_layout(self) -> None:
+        previous_positions = {
+            int(node["node_id"]): (node.get("layout_x"), node.get("layout_y"))
+            for node in self.database.list_nodes()
+        }
         for node in self.database.list_nodes():
             self.database.update_node_layout(node["node_id"], None, None)
         data = self.graph_manager.get_graph_data(seed=self.next_layout_seed())
         for node in data["nodes"]:
             self.database.update_node_layout(node["node_id"], node["x"], node["y"])
+        self.push_undo({"kind": "layout", "positions": previous_positions})
         self.reload_graph()
         self.statusBar().showMessage("수동 좌표를 초기화했습니다.", 2500)
 
     def add_relation(self) -> None:
-        nodes = self.database.list_nodes()
+        nodes = self.nodes_with_parent_folder_names()
         if len(nodes) < 2:
             QMessageBox.information(self, "관계 추가", "관계를 만들려면 노드가 2개 이상 필요합니다.")
             return
@@ -548,7 +1147,7 @@ class MainWindow(QMainWindow):
             return
 
         dialog = RelationDialog(
-            self.database.list_nodes(),
+            self.nodes_with_parent_folder_names(),
             self.database.list_relation_types(),
             initial_values=relation,
             lock_nodes=True,
@@ -608,6 +1207,7 @@ class MainWindow(QMainWindow):
         if answer != QMessageBox.Yes:
             return
 
+        self.push_undo({"kind": "relation_delete", "relation": dict(relation)})
         self.database.delete_relation(relation_id)
         self.reload_graph()
         self.statusBar().showMessage(f"관계 {relation_id}번을 삭제했습니다.", 2500)
@@ -640,6 +1240,7 @@ class MainWindow(QMainWindow):
         if answer != QMessageBox.Yes:
             return
 
+        self.push_undo({"kind": "node_delete", "nodes": {node_id: node.get("status", "ACTIVE")}})
         self.database.update_node_status(node_id, "DELETED")
         self.selected_node = None
         self.reload_graph()
@@ -651,6 +1252,18 @@ class MainWindow(QMainWindow):
             self.delete_nodes(node_ids)
             return
         self.delete_node(node_id)
+
+    def delete_selected_nodes_from_panel(self) -> None:
+        selected_node_ids = self.graph_viewer.selected_node_ids()
+        if selected_node_ids:
+            if len(selected_node_ids) > 1:
+                self.delete_nodes(selected_node_ids)
+            else:
+                self.delete_node(selected_node_ids[0])
+            return
+
+        if self.selected_node:
+            self.delete_node(int(self.selected_node["node_id"]))
 
     def context_delete_node_ids(self, node_id: int) -> list[int]:
         selected_node_ids = self.graph_viewer.selected_node_ids()
@@ -689,6 +1302,12 @@ class MainWindow(QMainWindow):
             return
 
         deleted_node_ids = {node["node_id"] for node in nodes}
+        self.push_undo(
+            {
+                "kind": "node_delete",
+                "nodes": {int(node["node_id"]): node.get("status", "ACTIVE") for node in nodes},
+            }
+        )
         for node_id in deleted_node_ids:
             self.database.update_node_status(node_id, "DELETED")
         if self.selected_node and self.selected_node["node_id"] in deleted_node_ids:
@@ -712,6 +1331,11 @@ class MainWindow(QMainWindow):
     def build_node_context_menu(self, node: dict[str, Any]) -> QMenu:
         node_id = int(node["node_id"])
         menu = QMenu(self)
+
+        open_action = menu.addAction("열기")
+        open_action.setData(NODE_CONTEXT_OPEN_NODE)
+        open_action.triggered.connect(lambda _checked=False, node=dict(node): self.open_node(node))
+        menu.addSeparator()
 
         if node.get("node_type") == "FOLDER":
             contained_file_count = len(self.contained_file_node_ids(node_id))
@@ -750,6 +1374,49 @@ class MainWindow(QMainWindow):
             empty_action = edit_menu.addAction("연결된 관계 없음")
             empty_action.setEnabled(False)
             edit_menu.setEnabled(False)
+
+        color_menu = menu.addMenu("관계 색상")
+        if relations:
+            seen_relation_type_ids: set[int] = set()
+            for relation in relations:
+                relation_type_id = int(relation["relation_type_id"])
+                if relation_type_id in seen_relation_type_ids:
+                    continue
+                seen_relation_type_ids.add(relation_type_id)
+                color_action = color_menu.addAction(str(relation.get("relation_type_name") or relation_type_id))
+                color_action.triggered.connect(
+                    lambda _checked=False, relation_type_id=relation_type_id: self.choose_relation_type_color(
+                        relation_type_id
+                    )
+                )
+        else:
+            empty_color_action = color_menu.addAction("연결된 관계 없음")
+            empty_color_action.setEnabled(False)
+            color_menu.setEnabled(False)
+
+        menu.addSeparator()
+
+        note_action = menu.addAction("메모 보기/수정")
+        note_action.setData(NODE_CONTEXT_EDIT_NOTE)
+        note_action.triggered.connect(lambda _checked=False, node_id=node_id: self.edit_node_note(node_id))
+
+        highlight_menu = menu.addMenu("강조 색상")
+        highlight_menu.menuAction().setData(NODE_CONTEXT_HIGHLIGHT_NODE)
+        for color in self.highlight_color_slots:
+            highlight_action = highlight_menu.addAction(color)
+            highlight_action.setData(color)
+            highlight_action.triggered.connect(
+                lambda _checked=False, node_id=node_id, color=color: self.set_node_highlight(node_id, color)
+            )
+        custom_highlight_action = highlight_menu.addAction("직접 선택...")
+        custom_highlight_action.triggered.connect(
+            lambda _checked=False, node_id=node_id: self.choose_node_highlight(node_id)
+        )
+        clear_highlight_action = highlight_menu.addAction("강조 지우기")
+        clear_highlight_action.setData(NODE_CONTEXT_CLEAR_HIGHLIGHT)
+        clear_highlight_action.triggered.connect(
+            lambda _checked=False, node_id=node_id: self.set_node_highlight(node_id, None)
+        )
 
         menu.addSeparator()
 
@@ -791,10 +1458,63 @@ class MainWindow(QMainWindow):
         self.graph_viewer.focus_node(folder_node_id)
         self.statusBar().showMessage(f"내부 파일 {contained_file_count}개를 {action_label}.", 2500)
 
+    def edit_node_note(self, node_id: int) -> None:
+        node = self.database.get_node(node_id)
+        if node is None or node.get("status") == "DELETED":
+            self.reload_graph()
+            return
+        text, accepted = QInputDialog.getMultiLineText(
+            self,
+            "노드 메모",
+            "메모",
+            node.get("note") or "",
+        )
+        if not accepted:
+            return
+        self.database.update_node_note(node_id, text)
+        self.reload_graph()
+        refreshed = self.database.get_node(node_id)
+        if refreshed is not None:
+            self.on_node_selected(refreshed)
+            self.graph_viewer.focus_node(node_id)
+        self.statusBar().showMessage("노드 메모를 저장했습니다.", 1800)
+
+    def set_node_highlight(self, node_id: int, color: str | None) -> None:
+        if color is not None and not is_valid_color(color):
+            QMessageBox.warning(self, "강조 색상", "올바른 색상 값이 아닙니다.")
+            return
+        self.database.update_node_highlight_color(node_id, color)
+        self.reload_graph()
+        node = self.database.get_node(node_id)
+        if node is not None:
+            self.selected_node = node
+            self.control_panel.show_node(node)
+            self.graph_viewer.focus_node(node_id)
+        self.statusBar().showMessage("강조 색상을 저장했습니다.", 1500)
+
+    def choose_node_highlight(self, node_id: int) -> None:
+        color = QColorDialog.getColor(QColor("#F97316"), self, "강조 색상 선택")
+        if color.isValid():
+            self.set_node_highlight(node_id, color.name())
+
+    def choose_relation_type_color(self, relation_type_id: int) -> None:
+        color = QColorDialog.getColor(QColor("#64748B"), self, "관계 색상 선택")
+        if not color.isValid():
+            return
+        self.database.update_relation_type_color(relation_type_id, color.name())
+        self.reload_graph()
+        self.statusBar().showMessage("관계 색상을 저장했습니다.", 1500)
+
     def on_node_selected(self, node: dict[str, Any]) -> None:
         self.selected_node = node
         self.control_panel.show_node(node)
-        self.control_panel.show_relations(self.database.list_relations(node_id=node["node_id"]))
+        self.control_panel.show_relations(
+            relations_for_node_in_graph_data(self.current_graph_data, node["node_id"])
+        )
+        self.control_panel.set_selected_node_count(len(self.graph_viewer.selected_node_ids()))
+
+    def on_selected_nodes_changed(self, node_ids: list[int]) -> None:
+        self.control_panel.set_selected_node_count(len(node_ids))
 
     def on_node_moved(self, node_id: int, x: float, y: float) -> None:
         self.database.update_node_layout(node_id, x, y)
@@ -857,19 +1577,40 @@ class MainWindow(QMainWindow):
             #sidePanel {
                 background: #F8FAFC;
             }
-            QToolBar {
-                background: #FFFFFF;
-                border: 0;
-                border-bottom: 1px solid #E2E8F0;
-                padding: 6px;
-                spacing: 8px;
-            }
             QLineEdit {
                 border: 1px solid #CBD5E1;
                 border-radius: 6px;
                 padding: 7px 10px;
                 background: #FFFFFF;
                 color: #0F172A;
+            }
+            QTabWidget::pane {
+                border: 0;
+            }
+            QTabBar::tab {
+                border: 1px solid #CBD5E1;
+                border-radius: 6px;
+                padding: 7px 12px;
+                margin-right: 6px;
+                background: #FFFFFF;
+                color: #334155;
+            }
+            QTabBar::tab:selected {
+                background: #E0F2FE;
+                border-color: #7DD3FC;
+                color: #0F172A;
+            }
+            QComboBox {
+                border: 1px solid #CBD5E1;
+                border-radius: 6px;
+                padding: 6px 8px;
+                background: #FFFFFF;
+                color: #0F172A;
+                min-height: 28px;
+            }
+            QCheckBox {
+                color: #334155;
+                spacing: 8px;
             }
             QSpinBox {
                 border: 1px solid #CBD5E1;
@@ -1003,15 +1744,28 @@ def collapsed_contained_file_node_ids(
     }
 
 
+def relations_for_node_in_graph_data(
+    data: dict[str, list[dict[str, Any]]],
+    node_id: int,
+) -> list[dict[str, Any]]:
+    target_node_id = int(node_id)
+    return [
+        relation
+        for relation in data.get("relations", [])
+        if int(relation["source_id"]) == target_node_id
+        or int(relation["target_id"]) == target_node_id
+    ]
+
+
 def integrity_scan_status_message(result: IntegrityScanResult) -> str:
     if result.total == 0:
         return "확인할 노드가 없습니다."
     message = (
-        f"파일 상태 확인: {result.total}개 확인, 변경 {result.changed_count}개 "
+        f"파일 위치 갱신: {result.total}개 확인, 변경 {result.changed_count}개 "
         f"(정상 {result.active}, 누락 {result.missing}, 접근 거부 {result.access_denied})"
     )
     if result.hashes_updated:
-        message += f", 해시 갱신 {result.hashes_updated}개"
+        message += f", 변경 감지 정보 갱신 {result.hashes_updated}개"
     return message
 
 
@@ -1034,19 +1788,88 @@ def expand_import_paths(
     paths: list[str],
     *,
     include_folder_contents: bool,
+    ignored_dir_names: set[str] | None = None,
 ) -> list[tuple[str, str]]:
-    return build_import_plan(paths, include_folder_contents=include_folder_contents).entries
+    return build_import_plan(
+        paths,
+        include_folder_contents=include_folder_contents,
+        ignored_dir_names=ignored_dir_names,
+    ).entries
+
+
+def execute_import_plan(database: DatabaseManager, import_plan: ImportPlan) -> dict[str, Any]:
+    added_ids: list[int] = []
+    node_ids_by_path: dict[str, int] = {}
+    duplicate_count = 0
+    first_duplicate: dict[str, Any] | None = None
+
+    for path, node_type in import_plan.entries:
+        try:
+            node_id = database.add_node(path, node_type=node_type)
+            added_ids.append(node_id)
+        except DuplicateNodeError as exc:
+            duplicate_count += 1
+            if first_duplicate is None:
+                first_duplicate = exc.existing_node
+            node_id = int(exc.existing_node["node_id"])
+        node_ids_by_path[path] = node_id
+
+    contains_relation_count = add_default_contains_relations(
+        database,
+        import_plan.contains_pairs,
+        node_ids_by_path,
+    )
+    selected_id: int | None = None
+    if import_plan.contains_pairs:
+        selected_id = node_ids_by_path.get(import_plan.contains_pairs[0][0])
+    if selected_id is None and added_ids:
+        selected_id = added_ids[-1]
+
+    return {
+        "added_ids": added_ids,
+        "node_ids_by_path": node_ids_by_path,
+        "duplicate_count": duplicate_count,
+        "first_duplicate": first_duplicate,
+        "contains_relation_count": contains_relation_count,
+        "selected_id": selected_id,
+    }
+
+
+def add_default_contains_relations(
+    database: DatabaseManager,
+    contains_pairs: list[tuple[str, str]],
+    node_ids_by_path: dict[str, int],
+) -> int:
+    created_count = 0
+    for folder_path, file_path in contains_pairs:
+        source_id = node_ids_by_path.get(folder_path)
+        target_id = node_ids_by_path.get(file_path)
+        if source_id is None or target_id is None:
+            continue
+        try:
+            database.add_relation(
+                source_id,
+                target_id,
+                relation_type_code="CONTAINS",
+                strength="HIGH",
+            )
+        except DuplicateRelationError:
+            continue
+        created_count += 1
+    return created_count
 
 
 def build_import_plan(
     paths: list[str],
     *,
     include_folder_contents: bool,
+    ignored_dir_names: set[str] | None = None,
 ) -> ImportPlan:
     entries: list[tuple[str, str]] = []
     contains_pairs: list[tuple[str, str]] = []
     seen: set[str] = set()
     seen_contains_pairs: set[tuple[str, str]] = set()
+    ignored_names = normalize_ignored_dir_names(ignored_dir_names or DEFAULT_IGNORED_DIR_NAMES)
 
     def normalize_path(path: Path) -> str:
         return str(path.expanduser().resolve(strict=False))
@@ -1070,21 +1893,54 @@ def build_import_plan(
         if path.is_dir():
             add_entry(path, "FOLDER")
             if include_folder_contents:
-                for file_path in iter_folder_files(path):
-                    add_entry(file_path, "FILE")
-                    add_contains_pair(path, file_path)
+                for child_path, node_type, parent_path in iter_folder_entries(path, ignored_dir_names=ignored_names):
+                    add_entry(child_path, node_type)
+                    add_contains_pair(parent_path, child_path)
         else:
             add_entry(path, "FILE")
 
     return ImportPlan(entries=entries, contains_pairs=contains_pairs)
 
 
-def iter_folder_files(folder_path: Path):
+def iter_folder_entries(folder_path: Path, *, ignored_dir_names: set[str]):
     for root, dirnames, filenames in os.walk(folder_path):
         dirnames[:] = [
             dirname
             for dirname in dirnames
-            if dirname not in SKIPPED_RECURSIVE_DIR_NAMES
+            if dirname not in ignored_dir_names
         ]
+        current_folder = Path(root)
+        for dirname in dirnames:
+            child_folder = current_folder / dirname
+            yield child_folder, "FOLDER", current_folder
         for filename in filenames:
-            yield Path(root) / filename
+            yield current_folder / filename, "FILE", current_folder
+
+
+def iter_folder_files(folder_path: Path):
+    for child_path, node_type, _parent_path in iter_folder_entries(
+        folder_path,
+        ignored_dir_names=set(DEFAULT_IGNORED_DIR_NAMES),
+    ):
+        if node_type == "FILE":
+            yield child_path
+
+
+def normalize_ignored_dir_names(names) -> set[str]:
+    return {str(name).strip() for name in names if str(name).strip()}
+
+
+def is_valid_color(value: str) -> bool:
+    return QColor(value).isValid()
+
+
+def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        path.write_text("", encoding="utf-8")
+        return
+    fieldnames = sorted({key for row in rows for key in row})
+    with path.open("w", newline="", encoding="utf-8-sig") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)

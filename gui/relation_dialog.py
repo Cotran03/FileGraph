@@ -49,7 +49,7 @@ class RelationDialog(QDialog):
         self.description_input.setPlaceholderText("선택 입력")
 
         for node in nodes:
-            label = f"{node.get('name', '')}  ({node.get('node_type', '')})"
+            label = node_combo_label(node)
             self.source_combo.addItem(label, node["node_id"])
             self.target_combo.addItem(label, node["node_id"])
 
@@ -134,3 +134,11 @@ class RelationDialog(QDialog):
             if isinstance(relation_type, dict) and relation_type["name"].casefold() == current_text.casefold():
                 return relation_type
         return None
+
+
+def node_combo_label(node: dict[str, Any]) -> str:
+    label = f"{node.get('name', '')}  ({node.get('node_type', '')})"
+    parent_folder_name = str(node.get("parent_folder_name") or "").strip()
+    if parent_folder_name:
+        label += f"  · {parent_folder_name}"
+    return label

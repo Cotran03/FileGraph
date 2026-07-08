@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS nodes (
     file_hash TEXT,
     layout_x REAL,
     layout_y REAL,
+    note TEXT,
+    highlight_color TEXT,
     ai_status TEXT NOT NULL DEFAULT 'PENDING'
         CHECK (ai_status IN ('PENDING', 'SUCCESS', 'FAILED', 'SKIPPED')),
     ai_context TEXT,
@@ -197,6 +199,7 @@ class DatabaseManager:
 
     def init_db(self) -> None:
         self.conn.executescript(SCHEMA_SQL)
+        self._apply_migrations()
         self.conn.commit()
 
     def add_node(
@@ -398,6 +401,28 @@ class DatabaseManager:
         )
         self.conn.commit()
 
+    def update_node_note(self, node_id: int, note: str | None) -> None:
+        self.conn.execute(
+            """
+            UPDATE nodes
+            SET note = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE node_id = ?
+            """,
+            (normalize_optional_text(note), node_id),
+        )
+        self.conn.commit()
+
+    def update_node_highlight_color(self, node_id: int, color: str | None) -> None:
+        self.conn.execute(
+            """
+            UPDATE nodes
+            SET highlight_color = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE node_id = ?
+            """,
+            (normalize_optional_text(color), node_id),
+        )
+        self.conn.commit()
+
     def list_relation_types(self, *, include_inactive: bool = False) -> list[dict[str, Any]]:
         sql = "SELECT * FROM relation_types"
         params: tuple[Any, ...] = ()
@@ -438,6 +463,17 @@ class DatabaseManager:
         )
         self.conn.commit()
         return int(cursor.lastrowid)
+
+    def update_relation_type_color(self, relation_type_id: int, color: str) -> None:
+        self.conn.execute(
+            """
+            UPDATE relation_types
+            SET color = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE relation_type_id = ?
+            """,
+            (color, relation_type_id),
+        )
+        self.conn.commit()
 
     def add_relation(
         self,
@@ -639,6 +675,80 @@ class DatabaseManager:
         ).fetchone()
         return default if row is None else row["value"]
 
+    def list_orphan_nodes(self) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            """
+            SELECT n.*
+            FROM nodes n
+            WHERE n.status <> 'DELETED'
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM relations r
+                  JOIN nodes s ON s.node_id = r.source_id
+                  JOIN nodes t ON t.node_id = r.target_id
+                  WHERE (r.source_id = n.node_id OR r.target_id = n.node_id)
+                    AND s.status <> 'DELETED'
+                    AND t.status <> 'DELETED'
+              )
+            ORDER BY n.name COLLATE NOCASE
+            """
+        ).fetchall()
+        return rows_to_dicts(rows)
+
+    def list_duplicate_candidate_groups(self) -> list[dict[str, Any]]:
+        groups: list[dict[str, Any]] = []
+        rows = self.conn.execute(
+            """
+            SELECT file_hash, COUNT(*) AS match_count
+            FROM nodes
+            WHERE status <> 'DELETED'
+              AND COALESCE(file_hash, '') <> ''
+            GROUP BY file_hash
+            HAVING COUNT(*) > 1
+            ORDER BY match_count DESC, file_hash
+            """
+        ).fetchall()
+        for row in rows:
+            nodes = rows_to_dicts(
+                self.conn.execute(
+                    """
+                    SELECT *
+                    FROM nodes
+                    WHERE status <> 'DELETED'
+                      AND file_hash = ?
+                    ORDER BY name COLLATE NOCASE
+                    """,
+                    (row["file_hash"],),
+                ).fetchall()
+            )
+            groups.append({"kind": "hash", "value": row["file_hash"], "nodes": nodes})
+
+        rows = self.conn.execute(
+            """
+            SELECT LOWER(name) AS normalized_name, COUNT(*) AS match_count
+            FROM nodes
+            WHERE status <> 'DELETED'
+            GROUP BY LOWER(name)
+            HAVING COUNT(*) > 1
+            ORDER BY match_count DESC, normalized_name
+            """
+        ).fetchall()
+        for row in rows:
+            nodes = rows_to_dicts(
+                self.conn.execute(
+                    """
+                    SELECT *
+                    FROM nodes
+                    WHERE status <> 'DELETED'
+                      AND LOWER(name) = ?
+                    ORDER BY path COLLATE NOCASE
+                    """,
+                    (row["normalized_name"],),
+                ).fetchall()
+            )
+            groups.append({"kind": "name", "value": row["normalized_name"], "nodes": nodes})
+        return groups
+
     def _resolve_relation_type(self, relation_type_id: int | None, relation_type_code: str) -> dict[str, Any]:
         if relation_type_id is not None:
             row = self.conn.execute(
@@ -655,6 +765,18 @@ class DatabaseManager:
             raise ValueError("Unknown relation type.")
         return relation_type
 
+    def _apply_migrations(self) -> None:
+        existing_columns = {
+            row["name"]
+            for row in self.conn.execute("PRAGMA table_info(nodes)").fetchall()
+        }
+        for column_name, column_sql in (
+            ("note", "ALTER TABLE nodes ADD COLUMN note TEXT"),
+            ("highlight_color", "ALTER TABLE nodes ADD COLUMN highlight_color TEXT"),
+        ):
+            if column_name not in existing_columns:
+                self.conn.execute(column_sql)
+
 
 def normalize_path(path: str | os.PathLike[str]) -> str:
     return str(Path(path).expanduser().resolve(strict=False))
@@ -662,6 +784,13 @@ def normalize_path(path: str | os.PathLike[str]) -> str:
 
 def infer_node_type(path: str | os.PathLike[str]) -> str:
     return "FOLDER" if Path(path).is_dir() else "FILE"
+
+
+def normalize_optional_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    return normalized or None
 
 
 def get_file_identity(path: str | os.PathLike[str]) -> dict[str, str]:

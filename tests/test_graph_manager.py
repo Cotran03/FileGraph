@@ -5,9 +5,11 @@ import pytest
 from core.database_manager import DatabaseManager
 from core.graph_manager import (
     DEFAULT_LAYOUT_SCALE,
+    MIN_LAYOUT_NODE_GAP,
     GraphManager,
     default_layout_scale,
     layout_spring_distance,
+    resolve_layout_overlaps,
     relation_strength_weight,
 )
 
@@ -98,6 +100,18 @@ def test_compute_layout_keeps_saved_single_node_position(database):
     layout = GraphManager(database).compute_layout()
 
     assert layout[node_id] == (42.0, -12.0)
+
+
+def test_resolve_layout_overlaps_pushes_nodes_apart():
+    nodes = [
+        {"node_id": 1, "node_type": "FILE"},
+        {"node_id": 2, "node_type": "FILE"},
+    ]
+    layout = {1: (0.0, 0.0), 2: (5.0, 0.0)}
+
+    resolved = resolve_layout_overlaps(layout, nodes)
+
+    assert math.dist(resolved[1], resolved[2]) >= 56.0 + MIN_LAYOUT_NODE_GAP - 1e-6
 
 
 def test_focus_node_ids_returns_nodes_within_depth(database):

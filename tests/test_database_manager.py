@@ -62,6 +62,36 @@ def test_update_node_layout_persists_coordinates(database):
     assert node["layout_y"] == -8.25
 
 
+def test_update_node_note_and_highlight_persist(database):
+    node_id = database.add_node("C:/workspace/brief.md", node_type="FILE")
+
+    database.update_node_note(node_id, "review this")
+    database.update_node_highlight_color(node_id, "#F97316")
+
+    node = database.get_node(node_id)
+    assert node["note"] == "review this"
+    assert node["highlight_color"] == "#F97316"
+
+
+def test_list_orphan_nodes_excludes_connected_nodes(database):
+    orphan_id = database.add_node("C:/workspace/orphan.md", node_type="FILE")
+    source_id = database.add_node("C:/workspace/source.md", node_type="FILE")
+    target_id = database.add_node("C:/workspace/target.md", node_type="FILE")
+    database.add_relation(source_id, target_id)
+
+    assert [node["node_id"] for node in database.list_orphan_nodes()] == [orphan_id]
+
+
+def test_duplicate_candidate_groups_include_hash_and_name_matches(database):
+    first_id = database.add_node("C:/workspace/a/report.md", node_type="FILE", file_hash="same")
+    second_id = database.add_node("C:/workspace/b/report.md", node_type="FILE", file_hash="same")
+
+    groups = database.list_duplicate_candidate_groups()
+
+    assert any(group["kind"] == "hash" and {node["node_id"] for node in group["nodes"]} == {first_id, second_id} for group in groups)
+    assert any(group["kind"] == "name" and {node["node_id"] for node in group["nodes"]} == {first_id, second_id} for group in groups)
+
+
 def test_update_node_status_soft_deletes_node(database):
     node_id = database.add_node("C:/workspace/brief.md", node_type="FILE")
 

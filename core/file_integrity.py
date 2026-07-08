@@ -125,6 +125,7 @@ def rediscover_missing_nodes(
     database: DatabaseManager,
     search_roots: Sequence[str | os.PathLike[str]],
     *,
+    ignored_dir_names: Iterable[str] | None = None,
     max_hash_size: int = MAX_AUTO_HASH_BYTES,
 ) -> RediscoveryResult:
     missing_nodes = [
@@ -150,7 +151,7 @@ def rediscover_missing_nodes(
             restored=(),
         )
 
-    for candidate_path in iter_search_files(search_roots):
+    for candidate_path in iter_search_files(search_roots, ignored_dir_names=ignored_dir_names):
         scanned_files += 1
         candidate_hash = compute_file_hash(candidate_path, max_size=max_hash_size)
         if not candidate_hash:
@@ -268,7 +269,12 @@ def compute_file_hash(
         return None
 
 
-def iter_search_files(search_roots: Iterable[str | os.PathLike[str]]) -> Iterable[Path]:
+def iter_search_files(
+    search_roots: Iterable[str | os.PathLike[str]],
+    *,
+    ignored_dir_names: Iterable[str] | None = None,
+) -> Iterable[Path]:
+    ignored_names = normalized_ignored_dir_names(ignored_dir_names or SKIPPED_SCAN_DIR_NAMES)
     seen_roots: set[str] = set()
     for raw_root in search_roots:
         root = Path(raw_root).expanduser().resolve(strict=False)
@@ -281,7 +287,11 @@ def iter_search_files(search_roots: Iterable[str | os.PathLike[str]]) -> Iterabl
             dirnames[:] = [
                 dirname
                 for dirname in dirnames
-                if dirname not in SKIPPED_SCAN_DIR_NAMES
+                if dirname not in ignored_names
             ]
             for filename in filenames:
                 yield Path(current_root) / filename
+
+
+def normalized_ignored_dir_names(names: Iterable[str]) -> set[str]:
+    return {name.strip() for name in names if name and name.strip()}

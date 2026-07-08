@@ -1,24 +1,32 @@
 import os
 from pathlib import Path
+import shutil
 import uuid
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import QPoint
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox
 
 from core.file_integrity import compute_file_hash
 from gui.main_window import (
+    AI_ENABLED_SETTING,
+    AI_API_KEY_SAVED_SETTING,
     DUPLICATE_NODE_CANCEL,
     DUPLICATE_NODE_FOCUS,
     DUPLICATE_NODE_RELATION,
+    EDGE_LABEL_MODE_SETTING,
+    GEMINI_MODEL_SETTING,
     GRAPH_LABEL_FONT_SIZE_SETTING,
+    IGNORED_DIR_NAMES_SETTING,
     MainWindow,
     NODE_CONTEXT_ADD_RELATION,
     NODE_CONTEXT_DELETE_NODE,
     NODE_CONTEXT_EDIT_RELATIONS,
     NODE_CONTEXT_TOGGLE_CONTAINS,
+    NODE_LABEL_MODE_SETTING,
+    NODE_LABEL_MODE_USER_SET_SETTING,
     build_import_plan,
     expand_import_paths,
     relation_context_label,
@@ -67,6 +75,43 @@ def test_show_focus_graph_renders_only_nodes_within_depth(app):
     assert third_id not in window.graph_viewer.node_items
     assert unrelated_id not in window.graph_viewer.node_items
     assert window.control_panel.selected_node_id() == first_id
+    window.close()
+
+
+def test_search_suggestions_show_matching_nodes(app):
+    window = MainWindow(":memory:")
+    node_id = window.database.add_node("C:/workspace/brief.md", node_type="FILE")
+
+    window.update_search_suggestions("br")
+
+    assert window.control_panel.search_suggestions.count() == 1
+    assert window.control_panel.search_suggestions.item(0).data(Qt.UserRole) == node_id
+    window.close()
+
+
+def test_root_folder_annotation_marks_folders_without_parent(app):
+    window = MainWindow(":memory:")
+    root_id = window.database.add_node("C:/workspace", node_type="FOLDER")
+    child_id = window.database.add_node("C:/workspace/assets", node_type="FOLDER")
+    window.database.add_relation(root_id, child_id, relation_type_code="CONTAINS")
+
+    window.reload_graph()
+
+    nodes = {node["node_id"]: node for node in window.current_graph_data["nodes"]}
+    assert nodes[root_id]["is_root_folder"] is True
+    assert nodes[child_id]["is_root_folder"] is False
+    window.close()
+
+
+def test_undo_restores_deleted_node(app, monkeypatch):
+    window = MainWindow(":memory:")
+    node_id = window.database.add_node("C:/workspace/brief.md", node_type="FILE")
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.Yes)
+
+    window.delete_node(node_id)
+    window.undo_last_action()
+
+    assert window.database.get_node(node_id)["status"] == "ACTIVE"
     window.close()
 
 
@@ -280,6 +325,49 @@ def test_build_import_plan_tracks_folder_contains_pairs():
     assert (str(folder_path), str(file_path)) in plan.contains_pairs
 
 
+def test_build_import_plan_tracks_nested_folder_hierarchy():
+    root_path = Path.cwd() / f".filegraph-hierarchy-{uuid.uuid4().hex}"
+    try:
+        nested_path = root_path / "child"
+        nested_path.mkdir(parents=True)
+        file_path = nested_path / "note.txt"
+        file_path.write_text("hello", encoding="utf-8")
+
+        plan = build_import_plan([str(root_path)], include_folder_contents=True)
+
+        assert (str(root_path.resolve(strict=False)), "FOLDER") in plan.entries
+        assert (str(nested_path.resolve(strict=False)), "FOLDER") in plan.entries
+        assert (str(file_path.resolve(strict=False)), "FILE") in plan.entries
+        assert (str(root_path.resolve(strict=False)), str(nested_path.resolve(strict=False))) in plan.contains_pairs
+        assert (str(nested_path.resolve(strict=False)), str(file_path.resolve(strict=False))) in plan.contains_pairs
+    finally:
+        shutil.rmtree(root_path, ignore_errors=True)
+
+
+def test_build_import_plan_uses_custom_ignored_dirs():
+    root_path = Path.cwd() / f".filegraph-ignore-{uuid.uuid4().hex}"
+    try:
+        keep_path = root_path / "keep"
+        skip_path = root_path / "skip"
+        keep_path.mkdir(parents=True)
+        skip_path.mkdir()
+        (keep_path / "visible.txt").write_text("visible", encoding="utf-8")
+        (skip_path / "hidden.txt").write_text("hidden", encoding="utf-8")
+
+        plan = build_import_plan(
+            [str(root_path)],
+            include_folder_contents=True,
+            ignored_dir_names={"skip"},
+        )
+        paths = {path for path, _node_type in plan.entries}
+
+        assert str((keep_path / "visible.txt").resolve(strict=False)) in paths
+        assert str(skip_path.resolve(strict=False)) not in paths
+        assert str((skip_path / "hidden.txt").resolve(strict=False)) not in paths
+    finally:
+        shutil.rmtree(root_path, ignore_errors=True)
+
+
 def test_graph_font_size_updates_viewer_control_and_setting(app):
     window = MainWindow(":memory:")
 
@@ -289,6 +377,74 @@ def test_graph_font_size_updates_viewer_control_and_setting(app):
     assert window.graph_viewer.label_font_size == 16
     assert window.control_panel.font_size_input.value() == 16
     assert window.database.get_setting(GRAPH_LABEL_FONT_SIZE_SETTING) == "16"
+    window.close()
+
+
+def test_settings_updates_viewer_and_database(app):
+    window = MainWindow(":memory:")
+
+    window.set_node_label_mode("all")
+    window.set_edge_label_mode("always")
+    window.set_ignored_dir_names(["build", ".cache"])
+    window.set_ai_settings(True, "gemini-test")
+    window.delete_gemini_api_key()
+
+    assert window.graph_viewer.node_label_visibility == "all"
+    assert window.graph_viewer.edge_label_visibility == "always"
+    assert window.database.get_setting(NODE_LABEL_MODE_SETTING) == "all"
+    assert window.database.get_setting(EDGE_LABEL_MODE_SETTING) == "always"
+    assert window.database.get_setting(IGNORED_DIR_NAMES_SETTING) == ".cache,build"
+    assert window.database.get_setting(AI_ENABLED_SETTING) == "1"
+    assert window.database.get_setting(GEMINI_MODEL_SETTING) == "gemini-test"
+    assert window.database.get_setting(AI_API_KEY_SAVED_SETTING) == "0"
+    window.close()
+
+
+def test_settings_apply_preserves_selected_node_label_mode(app):
+    window = MainWindow(":memory:")
+
+    window.control_panel.ignored_folders_input.setText(".git, build")
+    window.control_panel.node_label_mode_combo.combo.setCurrentIndex(
+        window.control_panel.node_label_mode_combo.combo.findData("files")
+    )
+    window.control_panel.edge_label_mode_combo.combo.setCurrentIndex(
+        window.control_panel.edge_label_mode_combo.combo.findData("always")
+    )
+
+    window.control_panel.apply_settings_button.click()
+
+    assert window.node_label_mode == "files"
+    assert window.graph_viewer.node_label_visibility == "files"
+    assert window.control_panel.node_label_mode_combo.combo.currentData() == "files"
+    assert window.database.get_setting(NODE_LABEL_MODE_SETTING) == "files"
+    assert window.database.get_setting(IGNORED_DIR_NAMES_SETTING) == ".git,build"
+    window.close()
+
+
+def test_legacy_always_node_label_mode_loads_as_all(app):
+    window = MainWindow(":memory:")
+
+    window.set_node_label_mode("always")
+
+    assert window.node_label_mode == "all"
+    assert window.database.get_setting(NODE_LABEL_MODE_SETTING) == "all"
+    window.close()
+
+
+def test_legacy_unclaimed_node_label_mode_defaults_to_hover(app):
+    window = MainWindow(":memory:")
+    window.database.set_setting(NODE_LABEL_MODE_SETTING, "files")
+
+    assert window._load_node_label_mode() == "hover"
+    window.close()
+
+
+def test_user_saved_node_label_mode_is_preserved(app):
+    window = MainWindow(":memory:")
+    window.database.set_setting(NODE_LABEL_MODE_SETTING, "files")
+    window.database.set_setting(NODE_LABEL_MODE_USER_SET_SETTING, "1")
+
+    assert window._load_node_label_mode() == "files"
     window.close()
 
 
@@ -399,6 +555,9 @@ def test_folder_context_menu_toggles_contained_file_nodes(app):
     assert folder_id in window.graph_viewer.node_items
     assert file_id not in window.graph_viewer.node_items
     assert folder_id in window.collapsed_folder_node_ids
+    assert window.graph_viewer.node_items[folder_id].node["is_collapsed"] is True
+    assert window.graph_viewer.node_items[folder_id].node["collapsed_file_count"] == 1
+    assert window.graph_viewer.node_items[folder_id].collapsed_badge_item is not None
 
     expand_menu = window.build_node_context_menu(window.database.get_node(folder_id))
     expand_action = action_with_data(expand_menu, NODE_CONTEXT_TOGGLE_CONTAINS)
@@ -409,6 +568,25 @@ def test_folder_context_menu_toggles_contained_file_nodes(app):
     assert folder_id in window.graph_viewer.node_items
     assert file_id in window.graph_viewer.node_items
     assert folder_id not in window.collapsed_folder_node_ids
+    window.close()
+
+
+def test_focus_graph_respects_collapsed_folder_contents(app):
+    window = MainWindow(":memory:")
+    folder_id = window.database.add_node("C:/workspace/assets", node_type="FOLDER")
+    file_id = window.database.add_node("C:/workspace/assets/logo.png", node_type="FILE")
+    neighbor_id = window.database.add_node("C:/workspace/neighbor.md", node_type="FILE")
+    window.database.add_relation(folder_id, file_id, relation_type_code="CONTAINS", strength="HIGH")
+    window.database.add_relation(folder_id, neighbor_id)
+    window.collapsed_folder_node_ids.add(folder_id)
+    window.selected_node = window.database.get_node(folder_id)
+
+    window.show_focus_graph(1)
+
+    assert set(window.graph_viewer.node_items) == {folder_id, neighbor_id}
+    assert file_id not in window.graph_viewer.node_items
+    assert window.graph_viewer.node_items[folder_id].node["is_collapsed"] is True
+    assert window.control_panel.relation_list.count() == 1
     window.close()
 
 
