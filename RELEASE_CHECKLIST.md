@@ -4,23 +4,23 @@
 
 ## 1. 릴리즈 범위 고정
 
-- [ ] 현재 브랜치가 `dev`인지 확인한다.
-- [ ] AI 기능, API 키 입력, AI provider, AI 정책 문서, AI 의존성이 포함되지 않았는지 확인한다.
-- [ ] 새 기능 추가를 멈추고 버그 수정과 문서 정리만 반영한다.
-- [ ] `README.md`, `SPEC.md`, `USAGE.md`가 현재 UI와 기능을 설명하는지 확인한다.
+- [x] 현재 브랜치가 `main`인지 확인한다.
+- [x] AI 기능, API 키 입력, AI provider, AI 정책 문서, AI 의존성이 포함되지 않았는지 확인한다.
+- [x] 새 기능 추가를 멈추고 버그 수정과 문서 정리만 반영한다.
+- [x] `README.md`, `SPEC.md`, `USAGE.md`가 현재 UI와 기능을 설명하는지 확인한다.
 
 ## 2. 자동 검증
 
-- [ ] `.venv\Scripts\python.exe -m pytest`가 통과한다.
-- [ ] 테스트 후 새로 생긴 불필요한 캐시나 임시 파일을 정리한다.
-- [ ] 빌드 전에 `git status --short`로 의도한 변경만 남았는지 확인한다.
+- [x] `.venv\Scripts\python.exe -m pytest`가 통과한다.
+- [x] 테스트 후 새로 생긴 불필요한 캐시나 임시 파일을 정리한다.
+- [x] 빌드 전에 `git status --short`로 의도한 변경만 남았는지 확인한다.
 
 ## 3. 빌드 검증
 
-- [ ] `.venv\Scripts\pyinstaller.exe FileGraph.spec --noconfirm`으로 빌드한다.
-- [ ] `dist\FileGraph\FileGraph.exe`가 생성되는지 확인한다.
-- [ ] 빌드 산출물에 `assets/`와 `db/template_db.db`가 포함되는지 확인한다.
-- [ ] 빌드 중 생성된 불필요한 `build/`, `__pycache__/`, `.pytest_cache/`는 정리한다.
+- [x] `.venv\Scripts\pyinstaller.exe FileGraph.spec --noconfirm`으로 빌드한다.
+- [x] `dist\FileGraph\FileGraph.exe`가 생성되는지 확인한다.
+- [x] 빌드 산출물에 `assets/`와 `db/template_db.db`가 포함되는지 확인한다.
+- [x] 빌드 중 생성된 불필요한 `build/`, `__pycache__/`, `.pytest_cache/`는 정리한다.
 
 ## 4. 첫 실행 QA
 
@@ -104,9 +104,17 @@
 
 ## 12. 릴리즈 마감
 
-- [ ] `git status --short`에 의도한 소스/문서 변경만 있는지 확인한다.
-- [ ] 릴리즈 커밋을 만든다.
-- [ ] `origin/dev`에 푸시한다.
-- [ ] `main` 병합 전 마지막으로 AI 관련 파일/문구/의존성이 없는지 확인한다.
+- [x] `git status --short`에 의도한 소스/문서 변경만 있는지 확인한다.
+- [x] 릴리즈 커밋을 만든다.
+- [x] `origin/main`에 푸시한다.
+- [x] `main` 병합 전 마지막으로 AI 관련 파일/문구/의존성이 없는지 확인한다.
 - [ ] 릴리즈 태그와 릴리즈 노트 초안을 준비한다.
+
+## 점검 기록
+
+- 2026-07-09: `main`에서 자동 검증 완료. `pytest` 132개 통과.
+- 2026-07-09: 빌드 산출물 `dist\FileGraph\FileGraph.exe` 확인.
+- 2026-07-09: 빌드 산출물 내부 `_internal\assets`와 `_internal\db\template_db.db` 확인.
+- 2026-07-09: OpenAI/API key/LLM/provider 관련 코드 흔적 검색 결과 없음.
+- 2026-07-09: `%LOCALAPPDATA%\FileGraph`가 존재함. 첫 실행 QA를 다시 하려면 런타임 데이터를 삭제한 뒤 실행해야 한다.
 
