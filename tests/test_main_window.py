@@ -1,4 +1,5 @@
 import os
+import csv
 from pathlib import Path
 import shutil
 import uuid
@@ -7,7 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import QPoint, Qt
-from PySide6.QtWidgets import QApplication, QMenu, QMessageBox
+from PySide6.QtWidgets import QApplication, QFileDialog, QMenu, QMessageBox
 
 from core.database_manager import DatabaseManager
 from core.file_integrity import compute_file_hash
@@ -367,6 +368,47 @@ def test_build_import_plan_uses_custom_ignored_dirs():
         shutil.rmtree(root_path, ignore_errors=True)
 
 
+def test_build_import_plan_skips_direct_ignored_folder():
+    root_path = Path.cwd() / f".filegraph-ignore-root-{uuid.uuid4().hex}"
+    try:
+        skip_path = root_path / "skip"
+        skip_path.mkdir(parents=True)
+        (skip_path / "hidden.txt").write_text("hidden", encoding="utf-8")
+
+        plan = build_import_plan(
+            [str(skip_path)],
+            include_folder_contents=True,
+            ignored_dir_names={"skip"},
+        )
+
+        assert plan.entries == []
+        assert plan.contains_pairs == []
+    finally:
+        shutil.rmtree(root_path, ignore_errors=True)
+
+
+def test_add_dropped_paths_skips_direct_ignored_folder_without_prompt(app, monkeypatch):
+    root_path = Path.cwd() / f".filegraph-drop-ignore-{uuid.uuid4().hex}"
+    try:
+        skip_path = root_path / "skip"
+        skip_path.mkdir(parents=True)
+        (skip_path / "hidden.txt").write_text("hidden", encoding="utf-8")
+        window = MainWindow(":memory:")
+        window.ignored_dir_names = {"skip"}
+        monkeypatch.setattr(
+            window,
+            "ask_folder_import_options",
+            lambda *, folder_count: pytest.fail("ignored folders should not prompt for import options"),
+        )
+
+        window.add_dropped_paths([str(skip_path)])
+
+        assert window.database.list_nodes() == []
+        window.close()
+    finally:
+        shutil.rmtree(root_path, ignore_errors=True)
+
+
 def test_graph_font_size_updates_viewer_control_and_setting(app):
     window = MainWindow(":memory:")
 
@@ -374,7 +416,6 @@ def test_graph_font_size_updates_viewer_control_and_setting(app):
 
     assert window.graph_font_size == 16
     assert window.graph_viewer.label_font_size == 16
-    assert window.control_panel.font_size_input.value() == 16
     assert window.database.get_setting(GRAPH_LABEL_FONT_SIZE_SETTING) == "16"
     window.close()
 
@@ -391,27 +432,6 @@ def test_settings_updates_viewer_and_database(app):
     assert window.database.get_setting(NODE_LABEL_MODE_SETTING) == "all"
     assert window.database.get_setting(EDGE_LABEL_MODE_SETTING) == "always"
     assert window.database.get_setting(IGNORED_DIR_NAMES_SETTING) == ".cache,build"
-    window.close()
-
-
-def test_settings_apply_preserves_selected_node_label_mode(app):
-    window = MainWindow(":memory:")
-
-    window.control_panel.ignored_folders_input.setText(".git, build")
-    window.control_panel.node_label_mode_combo.combo.setCurrentIndex(
-        window.control_panel.node_label_mode_combo.combo.findData("files")
-    )
-    window.control_panel.edge_label_mode_combo.combo.setCurrentIndex(
-        window.control_panel.edge_label_mode_combo.combo.findData("always")
-    )
-
-    window.control_panel.apply_settings_button.click()
-
-    assert window.node_label_mode == "files"
-    assert window.graph_viewer.node_label_visibility == "files"
-    assert window.control_panel.node_label_mode_combo.combo.currentData() == "files"
-    assert window.database.get_setting(NODE_LABEL_MODE_SETTING) == "files"
-    assert window.database.get_setting(IGNORED_DIR_NAMES_SETTING) == ".git,build"
     window.close()
 
 
@@ -528,6 +548,32 @@ def test_replace_database_file_imports_nodes_and_keeps_backup(app, tmp_path):
     assert any(path.endswith("workspace\\new.md") or path.endswith("workspace/new.md") for path in imported_paths)
     assert not any(path.endswith("workspace\\old.md") or path.endswith("workspace/old.md") for path in imported_paths)
     window.close()
+
+
+def test_export_graph_csv_writes_nodes_and_relations(app, monkeypatch):
+    export_dir = Path.cwd() / f".filegraph-export-{uuid.uuid4().hex}"
+    window = MainWindow(":memory:")
+    try:
+        export_dir.mkdir()
+        source_id = window.database.add_node("C:/workspace/brief.md", node_type="FILE")
+        target_id = window.database.add_node("C:/workspace/deck.pptx", node_type="FILE")
+        relation_id = window.database.add_relation(source_id, target_id, relation_type_code="REFERENCE")
+        monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *args, **kwargs: str(export_dir))
+
+        window.export_graph_csv()
+
+        with (export_dir / "nodes.csv").open(encoding="utf-8-sig", newline="") as handle:
+            nodes = list(csv.DictReader(handle))
+        with (export_dir / "relations.csv").open(encoding="utf-8-sig", newline="") as handle:
+            relations = list(csv.DictReader(handle))
+
+        assert {row["name"] for row in nodes} == {"brief.md", "deck.pptx"}
+        assert relations[0]["relation_id"] == str(relation_id)
+        assert relations[0]["relation_type_code"] == "REFERENCE"
+        assert "CSV" in window.statusBar().currentMessage()
+    finally:
+        window.close()
+        shutil.rmtree(export_dir, ignore_errors=True)
 
 
 def test_refresh_file_statuses_marks_missing_paths(app):
@@ -723,6 +769,26 @@ def test_delete_nodes_soft_deletes_selected_nodes_and_hides_their_relations(app,
         second_relation_id,
     }
     assert window.selected_node is None
+    window.close()
+
+
+def test_delete_selected_nodes_from_panel_reloads_without_deleted_item_errors(app, monkeypatch):
+    window = MainWindow(":memory:")
+    first_id = window.database.add_node("C:/workspace/first.md", node_type="FILE")
+    second_id = window.database.add_node("C:/workspace/second.md", node_type="FILE")
+    third_id = window.database.add_node("C:/workspace/third.md", node_type="FILE")
+    window.reload_graph()
+    window.graph_viewer.node_items[first_id].setSelected(True)
+    window.graph_viewer.node_items[second_id].setSelected(True)
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.Yes)
+
+    window.delete_selected_nodes_from_panel()
+
+    assert window.database.get_node(first_id)["status"] == "DELETED"
+    assert window.database.get_node(second_id)["status"] == "DELETED"
+    assert window.database.get_node(third_id)["status"] == "ACTIVE"
+    assert set(window.graph_viewer.node_items) == {third_id}
+    assert window.graph_viewer.selected_node_ids() == []
     window.close()
 
 

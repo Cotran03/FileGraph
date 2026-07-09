@@ -175,13 +175,6 @@ class MainWindow(QMainWindow):
         )
         self.graph_viewer.set_extension_icon_overrides(self.extension_icon_overrides)
         self.control_panel = ControlPanel()
-        self.control_panel.set_graph_font_size(self.graph_font_size)
-        self.control_panel.set_settings(
-            ignored_dir_names=sorted(self.ignored_dir_names),
-            node_label_mode=self.node_label_mode,
-            edge_label_mode=self.edge_label_mode,
-            visual_settings=self.visual_settings(),
-        )
         self.search_input = self.control_panel.search_input
 
         self._build_layout()
@@ -262,7 +255,6 @@ class MainWindow(QMainWindow):
     def set_graph_font_size(self, point_size: int) -> None:
         self.graph_font_size = clamp_label_font_size(point_size)
         self.graph_viewer.set_label_font_size(self.graph_font_size)
-        self.control_panel.set_graph_font_size(self.graph_font_size)
         self.database.set_setting(GRAPH_LABEL_FONT_SIZE_SETTING, str(self.graph_font_size))
         self.statusBar().showMessage(f"그래프 글자 크기 {self.graph_font_size}pt", 1200)
 
@@ -313,7 +305,6 @@ class MainWindow(QMainWindow):
             EXTENSION_ICON_OVERRIDES_SETTING,
             json.dumps(self.extension_icon_overrides, ensure_ascii=False),
         )
-        self.control_panel.set_visual_settings(self.visual_settings())
         self.reload_graph()
         self.statusBar().showMessage("색상과 아이콘 설정을 저장했습니다.", 1500)
 
@@ -369,6 +360,8 @@ class MainWindow(QMainWindow):
         self.control_panel.checkFilesRequested.connect(self.refresh_file_statuses)
         self.control_panel.locateMissingRequested.connect(self.locate_missing_files)
         self.control_panel.importDatabaseRequested.connect(self.import_database_file)
+        self.control_panel.exportJsonRequested.connect(self.export_graph_json)
+        self.control_panel.exportCsvRequested.connect(self.export_graph_csv)
         self.control_panel.addRelationRequested.connect(self.add_relation)
         self.control_panel.deleteNodeRequested.connect(self.delete_node_or_selection)
         self.control_panel.deleteSelectedNodesRequested.connect(self.delete_selected_nodes_from_panel)
@@ -377,13 +370,7 @@ class MainWindow(QMainWindow):
         self.control_panel.viewPresetRequested.connect(self.apply_view_preset)
         self.control_panel.editRelationRequested.connect(self.edit_relation)
         self.control_panel.deleteRelationRequested.connect(self.delete_relation)
-        self.control_panel.graphFontSizeChanged.connect(self.set_graph_font_size)
-        self.control_panel.sampleDataRequested.connect(self.create_sample_data)
         self.control_panel.resetLayoutRequested.connect(self.reset_layout)
-        self.control_panel.ignoredFoldersChanged.connect(self.set_ignored_dir_names)
-        self.control_panel.nodeLabelModeChanged.connect(self.set_node_label_mode)
-        self.control_panel.edgeLabelModeChanged.connect(self.set_edge_label_mode)
-        self.control_panel.visualSettingsChanged.connect(self.set_visual_settings)
 
     def _connect_shortcuts(self) -> None:
         self.shortcuts: list[QShortcut] = []
@@ -408,6 +395,7 @@ class MainWindow(QMainWindow):
             "Ctrl+Shift+B": self.backup_database_file,
             "Ctrl+Shift+I": self.import_database_file,
             "Ctrl+Shift+E": self.export_graph_json,
+            "Ctrl+Shift+C": self.export_graph_csv,
         }
         for sequence, callback in shortcut_map.items():
             shortcut = QShortcut(QKeySequence(sequence), self)
@@ -624,6 +612,7 @@ class MainWindow(QMainWindow):
                     "Ctrl+Shift+B: DB 백업",
                     "Ctrl+Shift+I: DB 가져오기",
                     "Ctrl+Shift+E: JSON 내보내기",
+                    "Ctrl+Shift+C: CSV 내보내기",
                 ]
             ),
         )
@@ -782,13 +771,6 @@ class MainWindow(QMainWindow):
             edge_mode=self.edge_label_mode,
         )
         self.graph_viewer.set_extension_icon_overrides(self.extension_icon_overrides)
-        self.control_panel.set_graph_font_size(self.graph_font_size)
-        self.control_panel.set_settings(
-            ignored_dir_names=sorted(self.ignored_dir_names),
-            node_label_mode=self.node_label_mode,
-            edge_label_mode=self.edge_label_mode,
-            visual_settings=self.visual_settings(),
-        )
 
     def create_progress_dialog(self, title: str, label: str, *, maximum: int) -> QProgressDialog:
         progress = QProgressDialog(label, "취소", 0, maximum, self)
@@ -1112,6 +1094,9 @@ class MainWindow(QMainWindow):
     def add_folder_node(self) -> None:
         folder_path = QFileDialog.getExistingDirectory(self, "폴더 추가")
         if folder_path:
+            if should_ignore_directory(Path(folder_path), self.ignored_dir_names):
+                self.statusBar().showMessage("무시 폴더로 설정된 경로는 추가하지 않습니다.", 3000)
+                return
             include_folder_contents = self.ask_folder_import_options_for_paths([folder_path], folder_count=1)
             if include_folder_contents is None:
                 return
@@ -1122,7 +1107,7 @@ class MainWindow(QMainWindow):
             )
 
     def add_dropped_paths(self, paths: list[str]) -> None:
-        folder_count = count_folder_paths(paths)
+        folder_count = count_folder_paths(paths, ignored_dir_names=self.ignored_dir_names)
         include_folder_contents = False
         if folder_count:
             selected = self.ask_folder_import_options_for_paths(paths, folder_count=folder_count)
@@ -1188,6 +1173,9 @@ class MainWindow(QMainWindow):
             include_folder_contents=include_folder_contents,
             ignored_dir_names=self.ignored_dir_names,
         )
+        if not import_plan.entries:
+            self.statusBar().showMessage("무시 폴더 정책으로 추가할 경로가 없습니다.", 3000)
+            return
         if self.should_import_in_background(import_plan):
             self.start_background_import(import_plan, action_label=action_label)
             return
@@ -1383,41 +1371,6 @@ class MainWindow(QMainWindow):
         self.control_panel.show_relations(
             relations_for_node_in_graph_data(self.current_graph_data, refreshed["node_id"])
         )
-
-    def create_sample_data(self) -> None:
-        sample_root = Path.cwd() / "sample_workspace"
-        paths = {
-            "brief": sample_root / "campaign_brief.md",
-            "deck": sample_root / "launch_deck.pptx",
-            "assets": sample_root / "design_assets",
-            "budget": sample_root / "budget.xlsx",
-        }
-
-        node_ids: dict[str, int] = {}
-        for key, path in paths.items():
-            node_type = "FOLDER" if key == "assets" else "FILE"
-            node_ids[key] = self._ensure_sample_node(path, node_type=node_type)
-
-        relation_specs = [
-            ("deck", "brief", "REFERENCE", True, "HIGH", "발표 자료가 캠페인 기획서를 참고함"),
-            ("deck", "assets", "GENERATED_FROM", True, "MEDIUM", "디자인 에셋을 사용해 발표 자료를 구성함"),
-            ("brief", "budget", "RELATED", False, "MEDIUM", "기획서와 예산표가 같은 캠페인에 속함"),
-        ]
-        for source_key, target_key, relation_type, is_directional, strength, description in relation_specs:
-            try:
-                self.database.add_relation(
-                    node_ids[source_key],
-                    node_ids[target_key],
-                    relation_type_code=relation_type,
-                    is_directional=is_directional,
-                    strength=strength,
-                    description=description,
-                )
-            except DuplicateRelationError:
-                pass
-
-        self.reload_graph()
-        self.statusBar().showMessage("샘플 그래프를 만들었습니다.", 3000)
 
     def reset_layout(self) -> None:
         previous_positions = {
@@ -1867,12 +1820,6 @@ class MainWindow(QMainWindow):
         self.control_panel.show_node(self.selected_node)
         self.control_panel.show_relations(self.database.list_relations(node_id=node_id))
 
-    def _ensure_sample_node(self, path: Path, *, node_type: str) -> int:
-        try:
-            return self.database.add_node(path, node_type=node_type, name=path.name)
-        except DuplicateNodeError as exc:
-            return int(exc.existing_node["node_id"])
-
     def _create_relation(self, values: dict[str, Any]) -> int:
         if values["source_id"] == values["target_id"]:
             raise ValueError("서로 다른 두 노드를 선택해 주세요.")
@@ -1903,27 +1850,16 @@ class MainWindow(QMainWindow):
             #sidePanel {
                 background: #F8FAFC;
             }
+            #panelScrollArea,
+            #panelScrollContent {
+                border: 0;
+                background: #F8FAFC;
+            }
             QLineEdit {
                 border: 1px solid #CBD5E1;
                 border-radius: 6px;
                 padding: 7px 10px;
                 background: #FFFFFF;
-                color: #0F172A;
-            }
-            QTabWidget::pane {
-                border: 0;
-            }
-            QTabBar::tab {
-                border: 1px solid #CBD5E1;
-                border-radius: 6px;
-                padding: 7px 12px;
-                margin-right: 6px;
-                background: #FFFFFF;
-                color: #334155;
-            }
-            QTabBar::tab:selected {
-                background: #E0F2FE;
-                border-color: #7DD3FC;
                 color: #0F172A;
             }
             QComboBox {
@@ -2111,8 +2047,13 @@ def rediscovery_status_message(result: RediscoveryResult) -> str:
     return message
 
 
-def count_folder_paths(paths: list[str]) -> int:
-    return sum(1 for path in paths if Path(path).is_dir())
+def count_folder_paths(paths: list[str], *, ignored_dir_names: set[str] | None = None) -> int:
+    ignored_names = normalize_ignored_dir_names(ignored_dir_names or [])
+    return sum(
+        1
+        for path in paths
+        if Path(path).is_dir() and not should_ignore_directory(Path(path), ignored_names)
+    )
 
 
 def expand_import_paths(
@@ -2265,6 +2206,8 @@ def build_import_plan(
     for raw_path in paths:
         path = Path(raw_path)
         if path.is_dir():
+            if should_ignore_directory(path, ignored_names):
+                continue
             add_entry(path, "FOLDER")
             if include_folder_contents:
                 for child_path, node_type, parent_path in iter_folder_entries(path, ignored_dir_names=ignored_names):
@@ -2281,7 +2224,7 @@ def iter_folder_entries(folder_path: Path, *, ignored_dir_names: set[str]):
         dirnames[:] = [
             dirname
             for dirname in dirnames
-            if dirname not in ignored_dir_names
+            if not should_ignore_directory(Path(root) / dirname, ignored_dir_names)
         ]
         current_folder = Path(root)
         for dirname in dirnames:
@@ -2302,6 +2245,11 @@ def iter_folder_files(folder_path: Path):
 
 def normalize_ignored_dir_names(names) -> set[str]:
     return {str(name).strip() for name in names if str(name).strip()}
+
+
+def should_ignore_directory(path: Path, ignored_dir_names: set[str]) -> bool:
+    path_name = path.name.casefold()
+    return any(path_name == ignored_name.casefold() for ignored_name in ignored_dir_names)
 
 
 def is_valid_color(value: str) -> bool:

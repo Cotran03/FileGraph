@@ -6,6 +6,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QComboBox,
+    QColorDialog,
     QDialog,
     QDialogButtonBox,
     QFrame,
@@ -15,10 +16,10 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QScrollArea,
+    QHeaderView,
     QSizePolicy,
     QSpinBox,
     QTableWidget,
-    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -91,17 +92,53 @@ class SettingsDialog(QDialog):
         self.highlight_colors_input.setPlaceholderText("#F97316, #EAB308, #22C55E, #06B6D4, #A855F7")
         self.file_node_color_preview = ColorPreview()
         self.folder_node_color_preview = ColorPreview()
-        self.highlight_color_previews = [ColorPreview() for _index in range(5)]
+        self.file_node_color_picker_button = QPushButton("선택")
+        self.folder_node_color_picker_button = QPushButton("선택")
+        self.file_node_color_picker_button.setToolTip("파일 노드 색상 선택")
+        self.folder_node_color_picker_button.setToolTip("폴더 노드 색상 선택")
+        set_button_variant(self.file_node_color_picker_button, "secondary")
+        set_button_variant(self.folder_node_color_picker_button, "secondary")
+        self.highlight_color_previews: list[ColorPreview] = []
+        self.highlight_color_picker_buttons: list[QPushButton] = []
         color_grid.addWidget(field_label("파일 노드"), 0, 0)
-        color_grid.addLayout(color_input_row(self.file_node_color_input, self.file_node_color_preview), 0, 1)
+        color_grid.addLayout(
+            color_input_row(
+                self.file_node_color_input,
+                self.file_node_color_preview,
+                self.file_node_color_picker_button,
+            ),
+            0,
+            1,
+        )
         color_grid.addWidget(field_label("폴더 노드"), 1, 0)
-        color_grid.addLayout(color_input_row(self.folder_node_color_input, self.folder_node_color_preview), 1, 1)
+        color_grid.addLayout(
+            color_input_row(
+                self.folder_node_color_input,
+                self.folder_node_color_preview,
+                self.folder_node_color_picker_button,
+            ),
+            1,
+            1,
+        )
         color_grid.addWidget(field_label("강조색 슬롯"), 2, 0)
         color_grid.addWidget(self.highlight_colors_input, 2, 1)
         highlight_preview_row = QHBoxLayout()
-        highlight_preview_row.setSpacing(6)
-        for preview in self.highlight_color_previews:
-            highlight_preview_row.addWidget(preview)
+        highlight_preview_row.setSpacing(10)
+        for index in range(5):
+            preview = ColorPreview()
+            picker_button = QPushButton("선택")
+            picker_button.setToolTip(f"강조 색상 {index + 1} 선택")
+            set_button_variant(picker_button, "secondary")
+            picker_button.clicked.connect(
+                lambda _checked=False, index=index: self.choose_highlight_slot_color(index)
+            )
+            slot_row = QHBoxLayout()
+            slot_row.setSpacing(6)
+            slot_row.addWidget(preview)
+            slot_row.addWidget(picker_button)
+            highlight_preview_row.addLayout(slot_row)
+            self.highlight_color_previews.append(preview)
+            self.highlight_color_picker_buttons.append(picker_button)
         highlight_preview_row.addStretch(1)
         color_grid.addWidget(field_label("미리보기"), 3, 0)
         color_grid.addLayout(highlight_preview_row, 3, 1)
@@ -117,9 +154,11 @@ class SettingsDialog(QDialog):
 
         icon_section = Section("확장자 아이콘")
         self.icon_table = QTableWidget(0, 2)
-        self.icon_table.setHorizontalHeaderLabels(["확장자", "아이콘"])
-        self.icon_table.horizontalHeader().setStretchLastSection(True)
+        self.icon_table.setHorizontalHeaderLabels(["직접 입력할 확장자", "아이콘 분류"])
+        self.icon_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.icon_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.icon_table.verticalHeader().setVisible(False)
+        self.icon_table.verticalHeader().setDefaultSectionSize(40)
         self.icon_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.icon_table.setAlternatingRowColors(True)
         self.icon_table.setMinimumHeight(180)
@@ -164,16 +203,28 @@ class SettingsDialog(QDialog):
         self.file_node_color_input.textChanged.connect(self.sync_color_previews)
         self.folder_node_color_input.textChanged.connect(self.sync_color_previews)
         self.highlight_colors_input.textChanged.connect(self.sync_color_previews)
+        self.file_node_color_picker_button.clicked.connect(
+            lambda: self.choose_color_for_input(self.file_node_color_input)
+        )
+        self.folder_node_color_picker_button.clicked.connect(
+            lambda: self.choose_color_for_input(self.folder_node_color_input)
+        )
         self.sync_color_previews()
 
     def add_icon_mapping_row(self, extension: str, icon_name: str) -> None:
         row = self.icon_table.rowCount()
         self.icon_table.insertRow(row)
-        self.icon_table.setItem(row, 0, QTableWidgetItem(str(extension).removeprefix(".")))
+        self.icon_table.setRowHeight(row, 40)
+        extension_input = QLineEdit(str(extension).removeprefix("."))
+        extension_input.setPlaceholderText("예: pdf, log")
+        extension_input.setToolTip("아이콘을 바꿀 확장자를 직접 입력합니다. 점(.)은 입력해도 저장 시 제거됩니다.")
+        extension_input.setMinimumHeight(30)
+        self.icon_table.setCellWidget(row, 0, extension_input)
         self.icon_table.setCellWidget(row, 1, self.icon_combo(icon_name))
 
     def icon_combo(self, selected_icon_name: str) -> QComboBox:
         combo = QComboBox()
+        combo.setMinimumHeight(30)
         for icon_name in self.icon_names:
             combo.addItem(icon_label(icon_name), icon_name)
         index = combo.findData(selected_icon_name)
@@ -190,6 +241,30 @@ class SettingsDialog(QDialog):
         self.folder_node_color_input.setText(DEFAULT_NODE_TYPE_COLORS["FOLDER"])
         self.highlight_colors_input.setText(", ".join(DEFAULT_HIGHLIGHT_COLOR_SLOTS))
         self.sync_color_previews()
+
+    def choose_color_for_input(self, input_widget: QLineEdit) -> None:
+        current_color = QColor(input_widget.text().strip())
+        fallback_color = QColor(input_widget.placeholderText())
+        initial_color = current_color if current_color.isValid() else fallback_color
+        color = QColorDialog.getColor(initial_color, self, "색상 선택")
+        if color.isValid():
+            input_widget.setText(color.name().upper())
+
+    def choose_highlight_slot_color(self, index: int) -> None:
+        if index < 0 or index >= len(DEFAULT_HIGHLIGHT_COLOR_SLOTS):
+            return
+
+        highlight_colors = parse_csv_values(self.highlight_colors_input.text())
+        while len(highlight_colors) <= index:
+            highlight_colors.append(DEFAULT_HIGHLIGHT_COLOR_SLOTS[len(highlight_colors)])
+
+        current_color = QColor(highlight_colors[index])
+        fallback_color = QColor(DEFAULT_HIGHLIGHT_COLOR_SLOTS[index])
+        initial_color = current_color if current_color.isValid() else fallback_color
+        color = QColorDialog.getColor(initial_color, self, f"강조 색상 {index + 1} 선택")
+        if color.isValid():
+            highlight_colors[index] = color.name().upper()
+            self.highlight_colors_input.setText(", ".join(highlight_colors[:5]))
 
     def sync_color_previews(self) -> None:
         self.file_node_color_preview.set_color(self.file_node_color_input.text().strip())
@@ -217,8 +292,12 @@ class SettingsDialog(QDialog):
     def icon_mapping_values(self) -> dict[str, str]:
         overrides: dict[str, str] = {}
         for row in range(self.icon_table.rowCount()):
-            item = self.icon_table.item(row, 0)
-            extension = (item.text() if item is not None else "").strip().lower().removeprefix(".")
+            extension_widget = self.icon_table.cellWidget(row, 0)
+            extension = (
+                extension_widget.text()
+                if isinstance(extension_widget, QLineEdit)
+                else ""
+            ).strip().lower().removeprefix(".")
             combo = self.icon_table.cellWidget(row, 1)
             if extension and isinstance(combo, QComboBox):
                 overrides[extension] = str(combo.currentData(Qt.UserRole))
@@ -264,11 +343,17 @@ class ColorPreview(QLabel):
         self.setStyleSheet("border: 1px dashed #CBD5E1; border-radius: 5px; background: #FFFFFF;")
 
 
-def color_input_row(input_widget: QLineEdit, preview: ColorPreview) -> QHBoxLayout:
+def color_input_row(
+    input_widget: QLineEdit,
+    preview: ColorPreview,
+    picker_button: QPushButton | None = None,
+) -> QHBoxLayout:
     row = QHBoxLayout()
     row.setSpacing(8)
     row.addWidget(input_widget, 1)
     row.addWidget(preview)
+    if picker_button is not None:
+        row.addWidget(picker_button)
     return row
 
 

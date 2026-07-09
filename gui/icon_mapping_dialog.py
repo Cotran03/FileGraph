@@ -6,9 +6,10 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QHBoxLayout,
+    QHeaderView,
+    QLineEdit,
     QPushButton,
     QTableWidget,
-    QTableWidgetItem,
     QVBoxLayout,
 )
 
@@ -47,9 +48,11 @@ class IconMappingDialog(QDialog):
         self.setMinimumHeight(360)
 
         self.table = QTableWidget(0, 2)
-        self.table.setHorizontalHeaderLabels(["확장자", "아이콘"])
-        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setHorizontalHeaderLabels(["직접 입력할 확장자", "아이콘 분류"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(40)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setAlternatingRowColors(True)
 
@@ -80,13 +83,17 @@ class IconMappingDialog(QDialog):
     def add_mapping_row(self, extension: str, icon_name: str) -> None:
         row = self.table.rowCount()
         self.table.insertRow(row)
-        extension_item = QTableWidgetItem(str(extension).removeprefix("."))
-        extension_item.setData(Qt.UserRole, "extension")
-        self.table.setItem(row, 0, extension_item)
+        self.table.setRowHeight(row, 40)
+        extension_input = QLineEdit(str(extension).removeprefix("."))
+        extension_input.setPlaceholderText("예: pdf, log")
+        extension_input.setToolTip("아이콘을 바꿀 확장자를 직접 입력합니다. 점(.)은 입력해도 저장 시 제거됩니다.")
+        extension_input.setMinimumHeight(30)
+        self.table.setCellWidget(row, 0, extension_input)
         self.table.setCellWidget(row, 1, self.icon_combo(icon_name))
 
     def icon_combo(self, selected_icon_name: str) -> QComboBox:
         combo = QComboBox()
+        combo.setMinimumHeight(30)
         for icon_name in self.icon_names:
             combo.addItem(icon_label(icon_name), icon_name)
         index = combo.findData(selected_icon_name)
@@ -101,8 +108,12 @@ class IconMappingDialog(QDialog):
     def values(self) -> dict[str, str]:
         overrides: dict[str, str] = {}
         for row in range(self.table.rowCount()):
-            item = self.table.item(row, 0)
-            extension = (item.text() if item is not None else "").strip().lower().removeprefix(".")
+            extension_widget = self.table.cellWidget(row, 0)
+            extension = (
+                extension_widget.text()
+                if isinstance(extension_widget, QLineEdit)
+                else ""
+            ).strip().lower().removeprefix(".")
             combo = self.table.cellWidget(row, 1)
             if not extension or not isinstance(combo, QComboBox):
                 continue

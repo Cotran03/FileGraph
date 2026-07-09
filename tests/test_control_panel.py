@@ -3,7 +3,8 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QScrollArea
 
 from gui.control_panel import ControlPanel
 
@@ -102,21 +103,6 @@ def test_focus_depth_input_emits_depth_for_selected_node(app):
     assert full_view_requests == [True]
 
 
-def test_font_size_control_emits_and_can_be_set(app):
-    panel = ControlPanel()
-    font_sizes = []
-    panel.graphFontSizeChanged.connect(font_sizes.append)
-
-    panel.font_size_input.setValue(14)
-
-    assert font_sizes == [14]
-
-    panel.set_graph_font_size(12)
-
-    assert panel.font_size_input.value() == 12
-    assert font_sizes == [14]
-
-
 def test_check_files_button_emits_request(app):
     panel = ControlPanel()
     requests = []
@@ -149,6 +135,21 @@ def test_import_database_button_emits_request(app):
     assert requests == [True]
 
 
+def test_export_buttons_emit_requests(app):
+    panel = ControlPanel()
+    json_requests = []
+    csv_requests = []
+    panel.exportJsonRequested.connect(lambda: json_requests.append(True))
+    panel.exportCsvRequested.connect(lambda: csv_requests.append(True))
+
+    panel.export_json_button.click()
+    panel.export_csv_button.click()
+
+    assert json_requests == [True]
+    assert csv_requests == [True]
+    assert not hasattr(panel, "sample_button")
+
+
 def test_view_preset_button_emits_selected_preset(app):
     panel = ControlPanel()
     presets = []
@@ -168,38 +169,30 @@ def test_settings_button_opens_separate_settings_flow(app):
     panel.settings_button.click()
 
     assert requests == [True]
-    assert panel.tabs.count() == 1
+    assert not hasattr(panel, "tabs")
+    assert not hasattr(panel, "settings_tab")
 
 
-def test_settings_tab_emits_settings_values(app):
+def test_action_panel_scrolls_when_window_height_is_small(app):
     panel = ControlPanel()
-    ignored_values = []
-    node_modes = []
-    edge_modes = []
-    panel.ignoredFoldersChanged.connect(ignored_values.append)
-    panel.nodeLabelModeChanged.connect(node_modes.append)
-    panel.edgeLabelModeChanged.connect(edge_modes.append)
+    panel.resize(360, 300)
+    panel.show()
+    app.processEvents()
 
-    panel.ignored_folders_input.setText(".git, build, build")
-    panel.node_label_mode_combo.combo.setCurrentIndex(panel.node_label_mode_combo.combo.findData("files"))
-    panel.edge_label_mode_combo.combo.setCurrentIndex(panel.edge_label_mode_combo.combo.findData("hover"))
-    panel.apply_settings_button.click()
-
-    assert ignored_values == [[".git", "build"]]
-    assert node_modes == ["files"]
-    assert edge_modes == ["hover"]
+    assert isinstance(panel.actions_scroll_area, QScrollArea)
+    assert panel.actions_scroll_area.widget() is panel.actions_content
+    assert panel.actions_scroll_area.horizontalScrollBarPolicy() == Qt.ScrollBarAlwaysOff
+    assert panel.actions_scroll_area.verticalScrollBar().maximum() > 0
+    panel.close()
 
 
-def test_node_label_mode_combo_has_four_visibility_options(app):
+def test_control_panel_does_not_keep_embedded_settings_controls(app):
     panel = ControlPanel()
 
-    values = [
-        panel.node_label_mode_combo.combo.itemData(index)
-        for index in range(panel.node_label_mode_combo.combo.count())
-    ]
-
-    assert values == ["folders", "files", "all", "hover"]
-    assert panel.node_label_mode_combo.combo.currentData() == "hover"
+    assert not hasattr(panel, "apply_settings_button")
+    assert not hasattr(panel, "ignored_folders_input")
+    assert not hasattr(panel, "node_label_mode_combo")
+    assert not hasattr(panel, "file_node_color_input")
 
 
 def test_delete_button_can_emit_selected_node_group_without_current_node(app):

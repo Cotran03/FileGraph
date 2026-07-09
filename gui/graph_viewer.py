@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QRubberBand,
 )
+from shiboken6 import isValid
 
 
 NODE_COLORS = {
@@ -343,9 +344,13 @@ class GraphViewer(QGraphicsView):
         super().dropEvent(event)
 
     def render_graph(self, graph_data: dict[str, list[dict[str, Any]]]) -> None:
-        self.scene.clear()
-        self.node_items.clear()
-        self.edge_items.clear()
+        signals_were_blocked = self.scene.blockSignals(True)
+        try:
+            self.node_items.clear()
+            self.edge_items.clear()
+            self.scene.clear()
+        finally:
+            self.scene.blockSignals(signals_were_blocked)
 
         nodes = graph_data.get("nodes", [])
         relations = graph_data.get("relations", [])
@@ -369,7 +374,7 @@ class GraphViewer(QGraphicsView):
         else:
             self.scene.setSceneRect(-400, -300, 800, 600)
             self.resetTransform()
-            empty_item = QGraphicsTextItem("파일 추가 / 폴더 추가 / 샘플")
+            empty_item = QGraphicsTextItem("파일 추가 / 폴더 추가")
             empty_item.setDefaultTextColor(QColor("#64748B"))
             apply_label_font_size(empty_item, 13)
             rect = empty_item.boundingRect()
@@ -433,11 +438,17 @@ class GraphViewer(QGraphicsView):
         return self.selected_node_ids()
 
     def selected_node_ids(self) -> list[int]:
-        return [
-            node_id
-            for node_id, node_item in self.node_items.items()
-            if node_item.isSelected()
-        ]
+        selected_ids: list[int] = []
+        deleted_ids: list[int] = []
+        for node_id, node_item in self.node_items.items():
+            if not isValid(node_item):
+                deleted_ids.append(node_id)
+                continue
+            if node_item.isSelected():
+                selected_ids.append(node_id)
+        for node_id in deleted_ids:
+            self.node_items.pop(node_id, None)
+        return selected_ids
 
     def _emit_selected_nodes_changed(self) -> None:
         self.selectedNodesChanged.emit(self.selected_node_ids())
