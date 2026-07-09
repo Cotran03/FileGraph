@@ -7,6 +7,7 @@ import pytest
 from PySide6.QtCore import QEvent, QMimeData, QPoint, QRectF, Qt, QUrl
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import QApplication
+from shiboken6 import isValid
 
 from gui.graph_viewer import (
     ASSETS_DIR,
@@ -454,6 +455,32 @@ def test_ctrl_a_selects_all_visible_nodes(app):
 
     assert viewer.selected_node_ids() == [1, 2]
     assert event.isAccepted()
+
+
+def test_selected_node_ids_ignores_deleted_node_items(app):
+    viewer = GraphViewer()
+    viewer.render_graph(
+        {
+            "nodes": [
+                {"node_id": 1, "name": "first.md", "node_type": "FILE", "status": "ACTIVE", "x": 0, "y": 0},
+                {"node_id": 2, "name": "second.md", "node_type": "FILE", "status": "ACTIVE", "x": 100, "y": 0},
+            ],
+            "relations": [],
+        }
+    )
+    stale_items = dict(viewer.node_items)
+    viewer.node_items[1].setSelected(True)
+
+    signals_were_blocked = viewer.scene.blockSignals(True)
+    try:
+        viewer.scene.clear()
+    finally:
+        viewer.scene.blockSignals(signals_were_blocked)
+    viewer.node_items = stale_items
+
+    assert not isValid(stale_items[1])
+    assert viewer.selected_node_ids() == []
+    assert viewer.node_items == {}
 
 
 def test_selected_node_move_emits_positions_for_all_selected_nodes(app):

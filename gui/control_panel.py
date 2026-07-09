@@ -13,9 +13,9 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSpinBox,
-    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -54,7 +54,8 @@ class ControlPanel(QWidget):
     checkFilesRequested = Signal()
     locateMissingRequested = Signal()
     importDatabaseRequested = Signal()
-    sampleDataRequested = Signal()
+    exportJsonRequested = Signal()
+    exportCsvRequested = Signal()
     resetLayoutRequested = Signal()
     addRelationRequested = Signal()
     deleteNodeRequested = Signal(int)
@@ -64,11 +65,6 @@ class ControlPanel(QWidget):
     viewPresetRequested = Signal(str)
     editRelationRequested = Signal(int)
     deleteRelationRequested = Signal(int)
-    graphFontSizeChanged = Signal(int)
-    ignoredFoldersChanged = Signal(list)
-    nodeLabelModeChanged = Signal(str)
-    edgeLabelModeChanged = Signal(str)
-    visualSettingsChanged = Signal(dict)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -92,20 +88,21 @@ class ControlPanel(QWidget):
         header.addWidget(self.settings_button)
         root.addLayout(header)
 
-        self.tabs = QTabWidget()
-        self.actions_tab = QWidget()
-        self.settings_tab = QWidget()
-        self.tabs.addTab(self.actions_tab, "작업")
-        self.tabs.tabBar().hide()
-        root.addWidget(self.tabs, 1)
+        self.actions_scroll_area = QScrollArea()
+        self.actions_scroll_area.setObjectName("panelScrollArea")
+        self.actions_scroll_area.setWidgetResizable(True)
+        self.actions_scroll_area.setFrameShape(QFrame.NoFrame)
+        self.actions_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.actions_scroll_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        root.addWidget(self.actions_scroll_area, 1)
 
-        action_root = QVBoxLayout(self.actions_tab)
-        action_root.setContentsMargins(0, 10, 0, 0)
+        self.actions_content = QWidget()
+        self.actions_content.setObjectName("panelScrollContent")
+        self.actions_scroll_area.setWidget(self.actions_content)
+
+        action_root = QVBoxLayout(self.actions_content)
+        action_root.setContentsMargins(0, 10, 6, 0)
         action_root.setSpacing(14)
-
-        settings_root = QVBoxLayout(self.settings_tab)
-        settings_root.setContentsMargins(0, 10, 0, 0)
-        settings_root.setSpacing(14)
 
         import_actions = QGridLayout()
         import_actions.setHorizontalSpacing(8)
@@ -154,8 +151,9 @@ class ControlPanel(QWidget):
         self.check_files_button = QPushButton("파일 위치 갱신")
         self.locate_missing_button = QPushButton("누락 파일 찾기")
         self.import_db_button = QPushButton("DB 가져오기")
+        self.export_json_button = QPushButton("JSON 내보내기")
+        self.export_csv_button = QPushButton("CSV 내보내기")
         self.relation_button = QPushButton("관계 추가")
-        self.sample_button = QPushButton("샘플")
         self.reset_button = QPushButton("자동 정렬")
         set_button_variant(self.relation_button, "primary")
         for button in (
@@ -163,7 +161,8 @@ class ControlPanel(QWidget):
             self.check_files_button,
             self.locate_missing_button,
             self.import_db_button,
-            self.sample_button,
+            self.export_json_button,
+            self.export_csv_button,
             self.reset_button,
         ):
             set_button_variant(button, "secondary")
@@ -173,67 +172,16 @@ class ControlPanel(QWidget):
         actions.addWidget(self.relation_button, 0, 0, 1, 2)
         actions.addWidget(self.refresh_button, 1, 0)
         actions.addWidget(self.check_files_button, 1, 1)
-        actions.addWidget(self.sample_button, 2, 0)
-        actions.addWidget(self.reset_button, 2, 1)
+        actions.addWidget(self.reset_button, 2, 0, 1, 2)
         actions.addWidget(self.locate_missing_button, 3, 0, 1, 2)
         actions.addWidget(self.import_db_button, 4, 0, 1, 2)
+        actions.addWidget(self.export_json_button, 5, 0)
+        actions.addWidget(self.export_csv_button, 5, 1)
         action_root.addLayout(actions)
 
         self.selection_summary = QLabel("선택 노드 0개")
         self.selection_summary.setObjectName("metaText")
         action_root.addWidget(self.selection_summary)
-
-        font_controls = QHBoxLayout()
-        font_controls.setSpacing(8)
-        font_label = QLabel("글자 크기")
-        font_label.setObjectName("fieldLabel")
-        self.font_size_input = QSpinBox()
-        self.font_size_input.setRange(8, 24)
-        self.font_size_input.setValue(11)
-        self.font_size_input.setSuffix(" pt")
-        font_controls.addWidget(font_label)
-        font_controls.addWidget(self.font_size_input)
-
-        graph_section = Section("그래프 기본값")
-        graph_section.body.addLayout(font_controls)
-        self.node_label_mode_combo = labeled_combo("노드 라벨", NODE_LABEL_MODE_ITEMS)
-        self.edge_label_mode_combo = labeled_combo("간선 라벨", EDGE_LABEL_MODE_ITEMS)
-        set_combo_value(self.node_label_mode_combo.combo, "hover")
-        set_combo_value(self.edge_label_mode_combo.combo, "hover")
-        graph_section.body.addLayout(self.node_label_mode_combo.row)
-        graph_section.body.addLayout(self.edge_label_mode_combo.row)
-        settings_root.addWidget(graph_section)
-
-        visual_section = Section("색상과 아이콘")
-        color_row = QHBoxLayout()
-        color_row.setSpacing(8)
-        self.file_node_color_input = QLineEdit()
-        self.file_node_color_input.setPlaceholderText("#2563EB")
-        self.folder_node_color_input = QLineEdit()
-        self.folder_node_color_input.setPlaceholderText("#059669")
-        color_row.addWidget(QLabel("파일"))
-        color_row.addWidget(self.file_node_color_input)
-        color_row.addWidget(QLabel("폴더"))
-        color_row.addWidget(self.folder_node_color_input)
-        self.highlight_colors_input = QLineEdit()
-        self.highlight_colors_input.setPlaceholderText("#F97316, #EAB308, #22C55E, #06B6D4, #A855F7")
-        self.extension_icon_overrides_input = QLineEdit()
-        self.extension_icon_overrides_input.setPlaceholderText("log=doc, proto=code, bak=archive")
-        visual_section.body.addLayout(color_row)
-        visual_section.body.addWidget(self.highlight_colors_input)
-        visual_section.body.addWidget(self.extension_icon_overrides_input)
-        settings_root.addWidget(visual_section)
-
-        ignore_section = Section("무시 폴더")
-        self.ignored_folders_input = QLineEdit()
-        self.ignored_folders_input.setPlaceholderText(".git, .venv, node_modules")
-        ignore_section.body.addWidget(self.ignored_folders_input)
-        settings_root.addWidget(ignore_section)
-
-        self.apply_settings_button = QPushButton("설정 저장")
-        set_button_variant(self.apply_settings_button, "primary")
-        settings_root.addWidget(self.apply_settings_button)
-        settings_root.addStretch(1)
 
         self.node_section = Section("선택 노드")
         self.node_name = QLabel("선택된 노드가 없습니다.")
@@ -301,10 +249,10 @@ class ControlPanel(QWidget):
         self.check_files_button.clicked.connect(self.checkFilesRequested.emit)
         self.locate_missing_button.clicked.connect(self.locateMissingRequested.emit)
         self.import_db_button.clicked.connect(self.importDatabaseRequested.emit)
+        self.export_json_button.clicked.connect(self.exportJsonRequested.emit)
+        self.export_csv_button.clicked.connect(self.exportCsvRequested.emit)
         self.relation_button.clicked.connect(self.addRelationRequested.emit)
-        self.sample_button.clicked.connect(self.sampleDataRequested.emit)
         self.reset_button.clicked.connect(self.resetLayoutRequested.emit)
-        self.font_size_input.valueChanged.connect(self.graphFontSizeChanged.emit)
         self.delete_node_button.clicked.connect(self._emit_delete_node)
         self.focus_depth_input.valueChanged.connect(self._emit_focus_depth)
         self.focus_view_button.clicked.connect(self._emit_current_focus_depth)
@@ -314,30 +262,11 @@ class ControlPanel(QWidget):
         self.delete_relation_button.clicked.connect(self._emit_delete_relation)
         self.relation_list.itemDoubleClicked.connect(lambda _item: self._emit_edit_relation())
         self.relation_list.itemSelectionChanged.connect(self._sync_relation_buttons)
-        self.apply_settings_button.clicked.connect(self._emit_settings)
         self._sync_node_buttons()
         self._sync_relation_buttons()
 
     def set_summary(self, node_count: int, relation_count: int) -> None:
         self.summary.setText(f"노드 {node_count}개 / 관계 {relation_count}개")
-
-    def set_graph_font_size(self, point_size: int) -> None:
-        self.font_size_input.blockSignals(True)
-        self.font_size_input.setValue(point_size)
-        self.font_size_input.blockSignals(False)
-
-    def set_settings(
-        self,
-        *,
-        ignored_dir_names: list[str],
-        node_label_mode: str,
-        edge_label_mode: str,
-        visual_settings: dict[str, Any] | None = None,
-    ) -> None:
-        self.ignored_folders_input.setText(", ".join(ignored_dir_names))
-        set_combo_value(self.node_label_mode_combo.combo, node_label_mode)
-        set_combo_value(self.edge_label_mode_combo.combo, edge_label_mode)
-        self.set_visual_settings(visual_settings or {})
 
     def set_selected_node_count(self, count: int) -> None:
         self._selected_node_count = max(0, int(count))
@@ -352,15 +281,6 @@ class ControlPanel(QWidget):
             item.setToolTip(node.get("path", ""))
             self.search_suggestions.addItem(item)
         self.search_suggestions.setVisible(bool(nodes))
-
-    def set_visual_settings(self, settings: dict[str, Any]) -> None:
-        node_colors = settings.get("node_type_colors") or {}
-        self.file_node_color_input.setText(str(node_colors.get("FILE", "")))
-        self.folder_node_color_input.setText(str(node_colors.get("FOLDER", "")))
-        self.highlight_colors_input.setText(", ".join(settings.get("highlight_color_slots") or []))
-        self.extension_icon_overrides_input.setText(
-            format_extension_icon_overrides(settings.get("extension_icon_overrides") or {})
-        )
 
     def show_node(self, node: dict[str, Any] | None) -> None:
         if not node:
@@ -449,26 +369,6 @@ class ControlPanel(QWidget):
         preset = self.view_preset_combo.currentData(Qt.UserRole)
         self.viewPresetRequested.emit(str(preset or "all"))
 
-    def _emit_settings(self) -> None:
-        ignored_dir_names = parse_ignored_dir_names(self.ignored_folders_input.text())
-        node_label_mode = self.node_label_mode_combo.combo.currentData()
-        edge_label_mode = self.edge_label_mode_combo.combo.currentData()
-        visual_settings = {
-            "node_type_colors": {
-                "FILE": self.file_node_color_input.text().strip(),
-                "FOLDER": self.folder_node_color_input.text().strip(),
-            },
-            "highlight_color_slots": parse_csv_values(self.highlight_colors_input.text()),
-            "extension_icon_overrides": parse_extension_icon_overrides(
-                self.extension_icon_overrides_input.text()
-            ),
-        }
-
-        self.nodeLabelModeChanged.emit(node_label_mode)
-        self.edgeLabelModeChanged.emit(edge_label_mode)
-        self.ignoredFoldersChanged.emit(ignored_dir_names)
-        self.visualSettingsChanged.emit(visual_settings)
-
     def _sync_node_buttons(self) -> None:
         has_node = self.selected_node_id() is not None
         has_selection = self._selected_node_count > 0
@@ -518,25 +418,6 @@ class Separator(QFrame):
         self.setFrameShadow(QFrame.Plain)
 
 
-class LabeledCombo:
-    def __init__(self, row: QHBoxLayout, combo: QComboBox) -> None:
-        self.row = row
-        self.combo = combo
-
-
-def labeled_combo(label_text: str, items: tuple[tuple[str, str], ...]) -> LabeledCombo:
-    row = QHBoxLayout()
-    row.setSpacing(8)
-    label = QLabel(label_text)
-    label.setObjectName("fieldLabel")
-    combo = QComboBox()
-    for text, value in items:
-        combo.addItem(text, value)
-    row.addWidget(label)
-    row.addWidget(combo)
-    return LabeledCombo(row, combo)
-
-
 def set_combo_value(combo: QComboBox, value: str) -> None:
     index = combo.findData(value)
     if index < 0 and value == "always":
@@ -566,26 +447,6 @@ def parse_csv_values(value: str) -> list[str]:
         values.append(item)
         seen.add(item)
     return values
-
-
-def parse_extension_icon_overrides(value: str) -> dict[str, str]:
-    overrides: dict[str, str] = {}
-    for chunk in value.replace("\n", ",").split(","):
-        if "=" not in chunk:
-            continue
-        extension, icon_name = chunk.split("=", 1)
-        extension_key = extension.strip().lower().removeprefix(".")
-        icon_key = icon_name.strip().lower()
-        if extension_key and icon_key:
-            overrides[extension_key] = icon_key
-    return overrides
-
-
-def format_extension_icon_overrides(overrides: dict[str, str]) -> str:
-    return ", ".join(
-        f"{extension}={icon_name}"
-        for extension, icon_name in sorted(overrides.items())
-    )
 
 
 def search_suggestion_label(node: dict[str, Any]) -> str:
