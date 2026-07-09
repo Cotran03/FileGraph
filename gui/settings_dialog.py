@@ -4,7 +4,6 @@ from typing import Any
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -39,7 +38,6 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("설정")
         self.setMinimumSize(680, 620)
-        self.delete_api_key_requested = False
         self.icon_names = sorted(set(available_icon_names()) | {"file"})
 
         content = QWidget()
@@ -118,25 +116,6 @@ class SettingsDialog(QDialog):
         ignore_section.body.addWidget(self.ignored_folders_input)
         content_layout.addWidget(ignore_section)
 
-        ai_section = Section("AI")
-        self.ai_enabled_check = QCheckBox("AI 기능 사용")
-        self.ai_enabled_check.setChecked(bool(settings.get("ai_enabled", False)))
-        self.gemini_model_input = QLineEdit(str(settings.get("gemini_model", "")))
-        self.gemini_model_input.setPlaceholderText("gemini-1.5-flash")
-        self.api_key_status = QLabel("API 키 저장됨" if settings.get("api_key_saved") else "API 키 저장 안 됨")
-        self.api_key_status.setObjectName("metaText")
-        self.api_key_input = QLineEdit()
-        self.api_key_input.setEchoMode(QLineEdit.Password)
-        self.api_key_input.setPlaceholderText("새 API 키 입력")
-        delete_api_button = QPushButton("API 키 삭제")
-        set_button_variant(delete_api_button, "danger")
-        delete_api_button.clicked.connect(self.mark_api_key_delete)
-        ai_section.body.addWidget(self.ai_enabled_check)
-        ai_section.body.addWidget(self.gemini_model_input)
-        ai_section.body.addWidget(self.api_key_status)
-        ai_section.body.addWidget(self.api_key_input)
-        ai_section.body.addWidget(delete_api_button)
-        content_layout.addWidget(ai_section)
         content_layout.addStretch(1)
 
         scroll_area = QScrollArea()
@@ -171,20 +150,12 @@ class SettingsDialog(QDialog):
         for row in rows:
             self.icon_table.removeRow(row)
 
-    def mark_api_key_delete(self) -> None:
-        self.delete_api_key_requested = True
-        self.api_key_status.setText("저장된 API 키 삭제 예정")
-
     def values(self) -> dict[str, Any]:
         return {
             "graph_font_size": self.font_size_input.value(),
             "ignored_dir_names": parse_ignored_dir_names(self.ignored_folders_input.text()),
             "node_label_mode": self.node_label_combo.currentData(Qt.UserRole),
             "edge_label_mode": self.edge_label_combo.currentData(Qt.UserRole),
-            "ai_enabled": self.ai_enabled_check.isChecked(),
-            "gemini_model": self.gemini_model_input.text().strip(),
-            "api_key_to_save": self.api_key_input.text().strip(),
-            "delete_api_key": self.delete_api_key_requested,
             "visual_settings": {
                 "node_type_colors": {
                     "FILE": self.file_node_color_input.text().strip(),

@@ -25,10 +25,6 @@ CREATE TABLE IF NOT EXISTS nodes (
     layout_y REAL,
     note TEXT,
     highlight_color TEXT,
-    ai_status TEXT NOT NULL DEFAULT 'PENDING'
-        CHECK (ai_status IN ('PENDING', 'SUCCESS', 'FAILED', 'SKIPPED')),
-    ai_context TEXT,
-    ai_category TEXT,
     last_seen TEXT,
     deleted_at TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -82,8 +78,6 @@ CREATE TABLE IF NOT EXISTS relations (
         CHECK (is_directional IN (0, 1)),
     strength TEXT NOT NULL DEFAULT 'MEDIUM'
         CHECK (strength IN ('HIGH', 'MEDIUM', 'LOW')),
-    created_by TEXT NOT NULL DEFAULT 'USER'
-        CHECK (created_by IN ('USER', 'AI')),
     description TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -209,9 +203,6 @@ class DatabaseManager:
         node_type: str | None = None,
         name: str | None = None,
         file_hash: str | None = None,
-        ai_status: str = "PENDING",
-        ai_context: str | None = None,
-        ai_category: str | None = None,
     ) -> int:
         normalized_path = normalize_path(path)
         existing = self.get_node_by_path(normalized_path)
@@ -223,9 +214,6 @@ class DatabaseManager:
                     node_type=node_type,
                     name=name,
                     file_hash=file_hash,
-                    ai_status=ai_status,
-                    ai_context=ai_context,
-                    ai_category=ai_category,
                 )
             raise DuplicateNodeError(existing)
 
@@ -243,11 +231,8 @@ class DatabaseManager:
                 name,
                 path,
                 file_hash,
-                ai_status,
-                ai_context,
-                ai_category,
                 last_seen
-            ) VALUES (?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ) VALUES (?, ?, ?, 'ACTIVE', ?, ?, ?, CURRENT_TIMESTAMP)
             """,
             (
                 metadata["file_id"],
@@ -256,9 +241,6 @@ class DatabaseManager:
                 resolved_name,
                 normalized_path,
                 file_hash,
-                ai_status,
-                ai_context,
-                ai_category,
             ),
         )
         self.conn.commit()
@@ -272,9 +254,6 @@ class DatabaseManager:
         node_type: str | None = None,
         name: str | None = None,
         file_hash: str | None = None,
-        ai_status: str | None = None,
-        ai_context: str | None = None,
-        ai_category: str | None = None,
     ) -> int:
         existing = self.get_node(node_id)
         if existing is None:
@@ -284,9 +263,6 @@ class DatabaseManager:
         metadata = get_file_identity(normalized_path)
         resolved_node_type = node_type or infer_node_type(normalized_path)
         resolved_name = name or Path(normalized_path).name or normalized_path
-        resolved_ai_status = ai_status or existing["ai_status"]
-        resolved_ai_context = ai_context if ai_context is not None else existing["ai_context"]
-        resolved_ai_category = ai_category if ai_category is not None else existing["ai_category"]
 
         self.conn.execute(
             """
@@ -298,9 +274,6 @@ class DatabaseManager:
                 name = ?,
                 path = ?,
                 file_hash = ?,
-                ai_status = ?,
-                ai_context = ?,
-                ai_category = ?,
                 last_seen = CURRENT_TIMESTAMP,
                 deleted_at = NULL,
                 updated_at = CURRENT_TIMESTAMP
@@ -313,9 +286,6 @@ class DatabaseManager:
                 resolved_name,
                 normalized_path,
                 file_hash,
-                resolved_ai_status,
-                resolved_ai_context,
-                resolved_ai_category,
                 node_id,
             ),
         )
@@ -355,13 +325,11 @@ class DatabaseManager:
               AND (
                   name LIKE ?
                   OR path LIKE ?
-                  OR COALESCE(ai_category, '') LIKE ?
-                  OR COALESCE(ai_context, '') LIKE ?
               )
             ORDER BY name COLLATE NOCASE
             LIMIT ?
             """,
-            (pattern, pattern, pattern, pattern, limit),
+            (pattern, pattern, limit),
         ).fetchall()
         return rows_to_dicts(rows)
 
@@ -484,7 +452,6 @@ class DatabaseManager:
         relation_type_code: str = "RELATED",
         is_directional: bool | None = None,
         strength: str = "MEDIUM",
-        created_by: str = "USER",
         description: str | None = None,
     ) -> int:
         if source_id == target_id:
@@ -514,9 +481,8 @@ class DatabaseManager:
                 target_id,
                 is_directional,
                 strength,
-                created_by,
                 description
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
                 relation_type["relation_type_id"],
@@ -524,7 +490,6 @@ class DatabaseManager:
                 target_id,
                 int(resolved_is_directional),
                 strength,
-                created_by,
                 description,
             ),
         )

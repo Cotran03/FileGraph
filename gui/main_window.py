@@ -62,13 +62,9 @@ NODE_LABEL_MODE_SETTING = "graph_node_label_mode"
 NODE_LABEL_MODE_USER_SET_SETTING = "graph_node_label_mode_user_set"
 EDGE_LABEL_MODE_SETTING = "graph_edge_label_mode"
 IGNORED_DIR_NAMES_SETTING = "ignored_dir_names"
-AI_ENABLED_SETTING = "ai_enabled"
-GEMINI_MODEL_SETTING = "gemini_model"
-AI_API_KEY_SAVED_SETTING = "gemini_api_key_saved"
 EXTENSION_ICON_OVERRIDES_SETTING = "extension_icon_overrides"
 NODE_TYPE_COLORS_SETTING = "node_type_colors"
 HIGHLIGHT_COLOR_SLOTS_SETTING = "highlight_color_slots"
-DEFAULT_GEMINI_MODEL = "gemini-1.5-flash"
 DEFAULT_NODE_TYPE_COLORS = {
     "FILE": "#2563EB",
     "FOLDER": "#059669",
@@ -82,8 +78,6 @@ DEFAULT_HIGHLIGHT_COLOR_SLOTS = (
 )
 SEARCH_LAYOUT_SCALE = 420.0
 BACKGROUND_IMPORT_THRESHOLD = 500
-KEYRING_SERVICE_NAME = "FileGraph"
-KEYRING_GEMINI_API_USERNAME = "gemini_api_key"
 MAX_LAYOUT_SEED = 2_147_483_647
 NODE_CONTEXT_ADD_RELATION = "node_context_add_relation"
 NODE_CONTEXT_EDIT_RELATIONS = "node_context_edit_relations"
@@ -143,9 +137,6 @@ class MainWindow(QMainWindow):
         self.extension_icon_overrides = self._load_json_setting(EXTENSION_ICON_OVERRIDES_SETTING, {})
         self.node_type_colors = self._load_node_type_colors()
         self.highlight_color_slots = self._load_highlight_color_slots()
-        self.ai_enabled = self._load_bool_setting(AI_ENABLED_SETTING, default=False)
-        self.gemini_model = self.database.get_setting(GEMINI_MODEL_SETTING, DEFAULT_GEMINI_MODEL) or DEFAULT_GEMINI_MODEL
-        self.api_key_saved = self._load_bool_setting(AI_API_KEY_SAVED_SETTING, default=False)
         self.undo_stack: list[dict[str, Any]] = []
         self.import_worker_thread: QThread | None = None
         self.import_worker: ImportWorker | None = None
@@ -163,9 +154,6 @@ class MainWindow(QMainWindow):
             ignored_dir_names=sorted(self.ignored_dir_names),
             node_label_mode=self.node_label_mode,
             edge_label_mode=self.edge_label_mode,
-            ai_enabled=self.ai_enabled,
-            gemini_model=self.gemini_model,
-            api_key_saved=self.api_key_saved,
             visual_settings=self.visual_settings(),
         )
         self.search_input = self.control_panel.search_input
@@ -270,13 +258,6 @@ class MainWindow(QMainWindow):
         self.database.set_setting(IGNORED_DIR_NAMES_SETTING, ",".join(sorted(self.ignored_dir_names)))
         self.statusBar().showMessage("무시 폴더 목록을 저장했습니다.", 1500)
 
-    def set_ai_settings(self, enabled: bool, gemini_model: str) -> None:
-        self.ai_enabled = bool(enabled)
-        self.gemini_model = gemini_model.strip() or DEFAULT_GEMINI_MODEL
-        self.database.set_setting(AI_ENABLED_SETTING, "1" if self.ai_enabled else "0")
-        self.database.set_setting(GEMINI_MODEL_SETTING, self.gemini_model)
-        self.statusBar().showMessage("AI 설정을 저장했습니다.", 1500)
-
     def set_visual_settings(self, settings: dict[str, Any]) -> None:
         node_colors = settings.get("node_type_colors") or {}
         updated_node_colors = dict(DEFAULT_NODE_TYPE_COLORS)
@@ -316,9 +297,6 @@ class MainWindow(QMainWindow):
             "node_label_mode": self.node_label_mode,
             "edge_label_mode": self.edge_label_mode,
             "ignored_dir_names": sorted(self.ignored_dir_names),
-            "ai_enabled": self.ai_enabled,
-            "gemini_model": self.gemini_model,
-            "api_key_saved": self.api_key_saved,
             **self.visual_settings(),
         }
 
@@ -332,40 +310,8 @@ class MainWindow(QMainWindow):
         self.set_node_label_mode(values["node_label_mode"])
         self.set_edge_label_mode(values["edge_label_mode"])
         self.set_ignored_dir_names(values["ignored_dir_names"])
-        self.set_ai_settings(values["ai_enabled"], values["gemini_model"])
         self.set_visual_settings(values["visual_settings"])
-        if values.get("delete_api_key"):
-            self.delete_gemini_api_key()
-        if values.get("api_key_to_save"):
-            self.save_gemini_api_key(values["api_key_to_save"])
         self.statusBar().showMessage("설정을 저장했습니다.", 1800)
-
-    def save_gemini_api_key(self, api_key: str) -> None:
-        try:
-            import keyring
-
-            keyring.set_password(KEYRING_SERVICE_NAME, KEYRING_GEMINI_API_USERNAME, api_key)
-        except Exception as exc:  # pragma: no cover - depends on the user's keyring backend.
-            QMessageBox.warning(self, "API 키 저장 실패", f"keyring에 API 키를 저장하지 못했습니다.\n{exc}")
-            return
-
-        self.api_key_saved = True
-        self.database.set_setting(AI_API_KEY_SAVED_SETTING, "1")
-        self.control_panel.set_api_key_saved(True)
-        self.statusBar().showMessage("API 키를 keyring에 저장했습니다.", 1500)
-
-    def delete_gemini_api_key(self) -> None:
-        try:
-            import keyring
-
-            keyring.delete_password(KEYRING_SERVICE_NAME, KEYRING_GEMINI_API_USERNAME)
-        except Exception:
-            pass
-
-        self.api_key_saved = False
-        self.database.set_setting(AI_API_KEY_SAVED_SETTING, "0")
-        self.control_panel.set_api_key_saved(False)
-        self.statusBar().showMessage("API 키 저장 상태를 삭제했습니다.", 1500)
 
     def next_layout_seed(self) -> int:
         # Layout seed is not security-sensitive.
@@ -409,10 +355,7 @@ class MainWindow(QMainWindow):
         self.control_panel.ignoredFoldersChanged.connect(self.set_ignored_dir_names)
         self.control_panel.nodeLabelModeChanged.connect(self.set_node_label_mode)
         self.control_panel.edgeLabelModeChanged.connect(self.set_edge_label_mode)
-        self.control_panel.aiSettingsChanged.connect(self.set_ai_settings)
         self.control_panel.visualSettingsChanged.connect(self.set_visual_settings)
-        self.control_panel.apiKeySaveRequested.connect(self.save_gemini_api_key)
-        self.control_panel.apiKeyDeleteRequested.connect(self.delete_gemini_api_key)
 
     def _connect_shortcuts(self) -> None:
         self.shortcuts: list[QShortcut] = []
@@ -602,7 +545,6 @@ class MainWindow(QMainWindow):
                     relation_type_id=int(relation["relation_type_id"]),
                     is_directional=bool(relation.get("is_directional")),
                     strength=relation.get("strength") or "MEDIUM",
-                    created_by=relation.get("created_by") or "USER",
                     description=relation.get("description"),
                 )
             except (DuplicateRelationError, KeyError, ValueError):

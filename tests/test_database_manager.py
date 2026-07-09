@@ -37,18 +37,12 @@ def test_add_node_rejects_duplicate_path(database):
     assert exc_info.value.existing_node["node_id"] == node_id
 
 
-def test_search_nodes_matches_name_path_category_and_context(database):
-    database.add_node(
-        "C:/workspace/brief.md",
-        node_type="FILE",
-        ai_category="마케팅",
-        ai_context="launch campaign plan",
-    )
+def test_search_nodes_matches_name_and_path(database):
+    database.add_node("C:/workspace/brief.md", node_type="FILE")
     database.add_node("C:/workspace/budget.xlsx", node_type="FILE")
 
     assert [node["name"] for node in database.search_nodes("brief")] == ["brief.md"]
-    assert [node["name"] for node in database.search_nodes("마케팅")] == ["brief.md"]
-    assert [node["name"] for node in database.search_nodes("campaign")] == ["brief.md"]
+    assert [node["name"] for node in database.search_nodes("workspace")] == ["brief.md", "budget.xlsx"]
     assert [node["name"] for node in database.search_nodes("budget")] == ["budget.xlsx"]
 
 

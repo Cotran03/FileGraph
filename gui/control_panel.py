@@ -4,7 +4,6 @@ from typing import Any
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QCheckBox,
     QComboBox,
     QFrame,
     QGridLayout,
@@ -58,10 +57,7 @@ class ControlPanel(QWidget):
     ignoredFoldersChanged = Signal(list)
     nodeLabelModeChanged = Signal(str)
     edgeLabelModeChanged = Signal(str)
-    aiSettingsChanged = Signal(bool, str)
     visualSettingsChanged = Signal(dict)
-    apiKeySaveRequested = Signal(str)
-    apiKeyDeleteRequested = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -209,30 +205,6 @@ class ControlPanel(QWidget):
         ignore_section.body.addWidget(self.ignored_folders_input)
         settings_root.addWidget(ignore_section)
 
-        ai_section = Section("AI")
-        self.ai_enabled_check = QCheckBox("AI 기능 사용")
-        self.gemini_model_input = QLineEdit()
-        self.gemini_model_input.setPlaceholderText("gemini-1.5-flash")
-        self.api_key_status = QLabel("API 키: 저장 안 됨")
-        self.api_key_status.setObjectName("metaText")
-        self.api_key_input = QLineEdit()
-        self.api_key_input.setEchoMode(QLineEdit.Password)
-        self.api_key_input.setPlaceholderText("API 키 입력")
-        api_actions = QHBoxLayout()
-        api_actions.setSpacing(8)
-        self.save_api_key_button = QPushButton("API 키 저장")
-        self.delete_api_key_button = QPushButton("API 키 삭제")
-        set_button_variant(self.save_api_key_button, "secondary")
-        set_button_variant(self.delete_api_key_button, "danger")
-        api_actions.addWidget(self.save_api_key_button)
-        api_actions.addWidget(self.delete_api_key_button)
-        ai_section.body.addWidget(self.ai_enabled_check)
-        ai_section.body.addWidget(self.gemini_model_input)
-        ai_section.body.addWidget(self.api_key_status)
-        ai_section.body.addWidget(self.api_key_input)
-        ai_section.body.addLayout(api_actions)
-        settings_root.addWidget(ai_section)
-
         self.apply_settings_button = QPushButton("설정 저장")
         set_button_variant(self.apply_settings_button, "primary")
         settings_root.addWidget(self.apply_settings_button)
@@ -316,8 +288,6 @@ class ControlPanel(QWidget):
         self.relation_list.itemDoubleClicked.connect(lambda _item: self._emit_edit_relation())
         self.relation_list.itemSelectionChanged.connect(self._sync_relation_buttons)
         self.apply_settings_button.clicked.connect(self._emit_settings)
-        self.save_api_key_button.clicked.connect(self._emit_api_key_save)
-        self.delete_api_key_button.clicked.connect(self.apiKeyDeleteRequested.emit)
         self._sync_node_buttons()
         self._sync_relation_buttons()
 
@@ -335,21 +305,12 @@ class ControlPanel(QWidget):
         ignored_dir_names: list[str],
         node_label_mode: str,
         edge_label_mode: str,
-        ai_enabled: bool,
-        gemini_model: str,
-        api_key_saved: bool,
         visual_settings: dict[str, Any] | None = None,
     ) -> None:
         self.ignored_folders_input.setText(", ".join(ignored_dir_names))
         set_combo_value(self.node_label_mode_combo.combo, node_label_mode)
         set_combo_value(self.edge_label_mode_combo.combo, edge_label_mode)
-        self.ai_enabled_check.setChecked(ai_enabled)
-        self.gemini_model_input.setText(gemini_model)
-        self.set_api_key_saved(api_key_saved)
         self.set_visual_settings(visual_settings or {})
-
-    def set_api_key_saved(self, saved: bool) -> None:
-        self.api_key_status.setText("API 키: 저장됨" if saved else "API 키: 저장 안 됨")
 
     def set_selected_node_count(self, count: int) -> None:
         self._selected_node_count = max(0, int(count))
@@ -461,8 +422,6 @@ class ControlPanel(QWidget):
         ignored_dir_names = parse_ignored_dir_names(self.ignored_folders_input.text())
         node_label_mode = self.node_label_mode_combo.combo.currentData()
         edge_label_mode = self.edge_label_mode_combo.combo.currentData()
-        ai_enabled = self.ai_enabled_check.isChecked()
-        gemini_model = self.gemini_model_input.text().strip()
         visual_settings = {
             "node_type_colors": {
                 "FILE": self.file_node_color_input.text().strip(),
@@ -477,14 +436,7 @@ class ControlPanel(QWidget):
         self.nodeLabelModeChanged.emit(node_label_mode)
         self.edgeLabelModeChanged.emit(edge_label_mode)
         self.ignoredFoldersChanged.emit(ignored_dir_names)
-        self.aiSettingsChanged.emit(ai_enabled, gemini_model)
         self.visualSettingsChanged.emit(visual_settings)
-
-    def _emit_api_key_save(self) -> None:
-        api_key = self.api_key_input.text().strip()
-        if api_key:
-            self.apiKeySaveRequested.emit(api_key)
-            self.api_key_input.clear()
 
     def _sync_node_buttons(self) -> None:
         has_node = self.selected_node_id() is not None
@@ -615,7 +567,6 @@ def node_detail_text(node: dict[str, Any]) -> str:
     parts = [
         str(node.get("node_type", "")),
         str(node.get("status", "")),
-        f"AI {node.get('ai_status', '')}",
     ]
     if node.get("highlight_color"):
         parts.append(f"강조 {node.get('highlight_color')}")

@@ -155,23 +155,18 @@ def test_settings_tab_emits_settings_values(app):
     ignored_values = []
     node_modes = []
     edge_modes = []
-    ai_values = []
     panel.ignoredFoldersChanged.connect(ignored_values.append)
     panel.nodeLabelModeChanged.connect(node_modes.append)
     panel.edgeLabelModeChanged.connect(edge_modes.append)
-    panel.aiSettingsChanged.connect(lambda enabled, model: ai_values.append((enabled, model)))
 
     panel.ignored_folders_input.setText(".git, build, build")
     panel.node_label_mode_combo.combo.setCurrentIndex(panel.node_label_mode_combo.combo.findData("files"))
     panel.edge_label_mode_combo.combo.setCurrentIndex(panel.edge_label_mode_combo.combo.findData("hover"))
-    panel.ai_enabled_check.setChecked(True)
-    panel.gemini_model_input.setText("gemini-test")
     panel.apply_settings_button.click()
 
     assert ignored_values == [[".git", "build"]]
     assert node_modes == ["files"]
     assert edge_modes == ["hover"]
-    assert ai_values == [(True, "gemini-test")]
 
 
 def test_node_label_mode_combo_has_four_visibility_options(app):

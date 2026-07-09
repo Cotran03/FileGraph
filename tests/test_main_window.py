@@ -11,13 +11,10 @@ from PySide6.QtWidgets import QApplication, QMenu, QMessageBox
 
 from core.file_integrity import compute_file_hash
 from gui.main_window import (
-    AI_ENABLED_SETTING,
-    AI_API_KEY_SAVED_SETTING,
     DUPLICATE_NODE_CANCEL,
     DUPLICATE_NODE_FOCUS,
     DUPLICATE_NODE_RELATION,
     EDGE_LABEL_MODE_SETTING,
-    GEMINI_MODEL_SETTING,
     GRAPH_LABEL_FONT_SIZE_SETTING,
     IGNORED_DIR_NAMES_SETTING,
     MainWindow,
@@ -386,17 +383,12 @@ def test_settings_updates_viewer_and_database(app):
     window.set_node_label_mode("all")
     window.set_edge_label_mode("always")
     window.set_ignored_dir_names(["build", ".cache"])
-    window.set_ai_settings(True, "gemini-test")
-    window.delete_gemini_api_key()
 
     assert window.graph_viewer.node_label_visibility == "all"
     assert window.graph_viewer.edge_label_visibility == "always"
     assert window.database.get_setting(NODE_LABEL_MODE_SETTING) == "all"
     assert window.database.get_setting(EDGE_LABEL_MODE_SETTING) == "always"
     assert window.database.get_setting(IGNORED_DIR_NAMES_SETTING) == ".cache,build"
-    assert window.database.get_setting(AI_ENABLED_SETTING) == "1"
-    assert window.database.get_setting(GEMINI_MODEL_SETTING) == "gemini-test"
-    assert window.database.get_setting(AI_API_KEY_SAVED_SETTING) == "0"
     window.close()
 
 
