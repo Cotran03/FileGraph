@@ -175,12 +175,16 @@ FileGraph는 파일 시스템의 물리적 위치와 별개로 파일/폴더 사
 - 대량 스캔 진행률 표시
 - 수동/자동 새로고침 정책 정리
 
-### Phase 3: AI 관계 분석
+### Phase 3: AI 연결 설정 및 관계 분석
 
+- AI 기능 Opt-in 토글
+- OpenRouter 기본 연결과 직접 연결 모드 선택
+- OpenRouter API 키, 모델 선택, 키 발급 안내
+- 직접 연결 공급자, API 키, Custom URL 설정
 - 사용자 API 키 입력
 - keyring 저장
 - 파일 본문 일부 추출
-- Gemini API 요청
+- 선택한 연결 방식으로 AI API 요청
 - AI 분석 실패 처리
 - 로컬 TF-IDF 대안 분석
 - AI가 만든 관계를 사용자가 수정할 수 있게 제공
@@ -579,7 +583,7 @@ LOW: 1
 - 작업 패널 상단의 `설정` 버튼으로 여는 별도 설정 화면
 - 하단 상태 표시줄
 - 작업 패널 주요 동작: 파일/폴더 추가, 검색, 관계 추가, 새로고침, 파일 위치 갱신, 샘플, 자동 정렬, 누락 파일 찾기
-- 설정 화면 주요 동작: 무시 폴더 목록, 그래프 라벨 기본값, 노드 색상, 강조 색상, 확장자 아이콘 매핑, AI 사용 여부/모델명, API 키 저장 상태 관리
+- 설정 화면 주요 동작: 무시 폴더 목록, 그래프 라벨 기본값, 노드 색상, 강조 색상, 확장자 아이콘 매핑, AI 사용 여부, 연결 방식, 공급자/모델, API 키 저장 상태 관리
 
 ### 8.2 노드 추가
 
@@ -682,10 +686,44 @@ AI 기능은 MVP 이후 단계입니다.
 
 기본 방향:
 
+- AI 기능은 기본 비활성화 상태로 시작한다.
+- 사용자가 명시적으로 AI 기능을 켠 뒤에만 AI 설정과 분석 기능을 노출한다.
+- 연결 방식은 OpenRouter 사용을 기본값으로 두고, 직접 연결을 선택지로 제공한다.
 - 사용자 개인 API 키를 사용한다.
-- API 키는 `keyring`에 저장한다.
+- API 키 원문은 `keyring`에 저장한다.
 - DB나 설정 파일에는 API 키 원문을 저장하지 않는다.
 - 분석 전에 외부 전송 동의 팝업을 보여준다.
+
+AI 설정 UI 목표:
+
+- 이 요구사항은 AI 설정 영역에만 적용한다.
+- 그래프 라벨, 노드 색상, 강조 색상, 확장자 아이콘, 무시 폴더 등 기존 비AI 설정은 현재 UI와 저장 방식을 유지한다.
+- `AI 기능 활성화` 체크박스가 꺼져 있으면 모든 AI 설정 컴포넌트를 숨긴다.
+- `AI 기능 활성화` 체크박스가 켜지면 AI 설정 영역을 동적으로 표시한다.
+- 연결 방식은 라디오 버튼으로 선택한다.
+- 연결 방식 기본값은 `OpenRouter 사용`이다.
+- OpenRouter 사용 시 표시 항목:
+  - OpenRouter API Key 입력창
+  - 키 발급 페이지를 여는 안내 버튼
+  - 모델 선택 드롭다운
+- OpenRouter 기본 모델 후보:
+  - `meta-llama/llama-3-8b-instruct:free`
+  - `google/gemma-2-9b-it:free`
+  - `deepseek/deepseek-chat:free`
+  - `openai/gpt-4o-mini`
+- 직접 연결 시 표시 항목:
+  - AI 공급자 선택 드롭다운
+  - API Key 입력창
+  - Custom URL 입력창
+- 직접 연결 공급자 후보:
+  - `OpenAI`
+  - `Anthropic (Claude)`
+  - `Google Gemini`
+  - `Custom (OpenAI Compatible)`
+- Custom URL 입력창은 공급자가 `Custom (OpenAI Compatible)`일 때만 활성화한다.
+- 외부 프롬프트의 페이지 파일명이나 화면 전환 구조 전제는 따르지 않고, FileGraph의 기존 설정 화면 구조에 맞춰 구현한다.
+- 일반 설정값은 기존 SQLite `settings` 테이블에 저장하고, API 키 원문은 `keyring`에 저장한다.
+- 저장된 설정값은 앱 시작 또는 설정 화면 열기 시 UI에 복원한다.
 
 분석 대상:
 
@@ -720,8 +758,9 @@ Rate Limit 대응:
 결정:
 
 ```text
-- Gemini 모델명은 `settings`에서 관리하고 코드에 하드코딩하지 않는다.
-- 기본값은 구현 시점의 안정 Flash 계열 모델로 둔다.
+- AI 연결 방식, 공급자, 모델명, Custom URL은 `settings`에서 관리하고 코드에 하드코딩하지 않는다.
+- OpenRouter 모델 목록은 구현 시점에 동작 확인한 모델 ID를 기본 후보로 둔다.
+- 직접 연결 공급자별 기본 모델은 구현 시점의 안정 모델 문자열을 사용한다.
 - 운영 기본값에는 latest alias를 쓰지 않고 stable model string을 사용한다.
 - AI 응답은 JSON으로 고정한다.
 - AI 응답은 파일별 분석 결과와 관계 추천 결과를 분리한다.
@@ -906,7 +945,11 @@ MVP에서는 watchdog 기반 실시간 감시를 넣지 않습니다.
 - 강조 색상 슬롯
 - 확장자 아이콘 사용자 지정 매핑
 - AI 기능 사용 여부
-- Gemini 모델명
+- AI 연결 방식
+- OpenRouter 모델명
+- 직접 연결 공급자
+- 직접 연결 모델명
+- Custom URL
 - API 키 저장 여부
 
 보안 정책:
@@ -923,7 +966,9 @@ MVP에서는 watchdog 기반 실시간 감시를 넣지 않습니다.
 - API 키 원문은 DB나 설정 파일에 저장하지 않는다.
 - API 키는 `keyring`에 저장한다.
 - keyring service name은 `FileGraph`로 둔다.
-- keyring username은 `gemini_api_key`로 둔다.
+- keyring username은 연결 방식별로 구분한다.
+- OpenRouter API 키 username은 `openrouter_api_key`로 둔다.
+- 직접 연결 API 키 username은 공급자별 키 이름을 사용한다.
 - 확장자 아이콘 매핑, 노드 색상, 강조 색상 슬롯처럼 구조가 있는 설정은 JSON 문자열로 저장한다.
 - AI 전송 동의 문구는 아래 문장을 기본값으로 사용한다.
 ```
