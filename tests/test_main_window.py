@@ -9,6 +9,7 @@ import pytest
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox
 
+from core.database_manager import DatabaseManager
 from core.file_integrity import compute_file_hash
 from gui.main_window import (
     DUPLICATE_NODE_CANCEL,
@@ -27,6 +28,7 @@ from gui.main_window import (
     build_import_plan,
     expand_import_paths,
     relation_context_label,
+    validate_filegraph_database,
 )
 
 
@@ -437,6 +439,94 @@ def test_user_saved_node_label_mode_is_preserved(app):
     window.database.set_setting(NODE_LABEL_MODE_USER_SET_SETTING, "1")
 
     assert window._load_node_label_mode() == "files"
+    window.close()
+
+
+def test_missing_view_preset_renders_only_missing_nodes(app):
+    window = MainWindow(":memory:")
+    active_id = window.database.add_node("C:/workspace/active.md", node_type="FILE")
+    missing_id = window.database.add_node("C:/workspace/missing.md", node_type="FILE")
+    window.database.update_node_status(missing_id, "MISSING")
+
+    window.apply_view_preset("missing")
+
+    assert active_id not in window.graph_viewer.node_items
+    assert set(window.graph_viewer.node_items) == {missing_id}
+    assert "누락 파일만" in window.statusBar().currentMessage()
+    window.close()
+
+
+def test_highlighted_view_preset_includes_neighbors(app):
+    window = MainWindow(":memory:")
+    highlighted_id = window.database.add_node("C:/workspace/highlighted.md", node_type="FILE")
+    neighbor_id = window.database.add_node("C:/workspace/neighbor.md", node_type="FILE")
+    unrelated_id = window.database.add_node("C:/workspace/unrelated.md", node_type="FILE")
+    window.database.add_relation(highlighted_id, neighbor_id)
+    window.database.update_node_highlight_color(highlighted_id, "#F97316")
+
+    window.apply_view_preset("highlighted")
+
+    assert set(window.graph_viewer.node_items) == {highlighted_id, neighbor_id}
+    assert unrelated_id not in window.graph_viewer.node_items
+    window.close()
+
+
+def test_folder_view_preset_renders_selected_folder_subtree(app):
+    window = MainWindow(":memory:")
+    root_id = window.database.add_node("C:/workspace", node_type="FOLDER")
+    child_folder_id = window.database.add_node("C:/workspace/assets", node_type="FOLDER")
+    file_id = window.database.add_node("C:/workspace/assets/logo.png", node_type="FILE")
+    unrelated_id = window.database.add_node("C:/other/readme.md", node_type="FILE")
+    window.database.add_relation(root_id, child_folder_id, relation_type_code="CONTAINS")
+    window.database.add_relation(child_folder_id, file_id, relation_type_code="CONTAINS")
+    window.selected_node = window.database.get_node(root_id)
+
+    window.apply_view_preset("folder")
+
+    assert set(window.graph_viewer.node_items) == {root_id, child_folder_id, file_id}
+    assert unrelated_id not in window.graph_viewer.node_items
+    window.close()
+
+
+def test_validate_filegraph_database_accepts_initialized_database(tmp_path):
+    db_path = tmp_path / "filegraph.db"
+    database = DatabaseManager(db_path)
+    database.init_db()
+    database.close()
+
+    is_valid, message = validate_filegraph_database(db_path)
+
+    assert is_valid is True
+    assert message == ""
+
+
+def test_validate_filegraph_database_rejects_non_database_file(tmp_path):
+    bad_path = tmp_path / "not-a-db.db"
+    bad_path.write_text("not sqlite", encoding="utf-8")
+
+    is_valid, message = validate_filegraph_database(bad_path)
+
+    assert is_valid is False
+    assert "SQLite DB" in message
+
+
+def test_replace_database_file_imports_nodes_and_keeps_backup(app, tmp_path):
+    target_path = tmp_path / "target.db"
+    source_path = tmp_path / "source.db"
+    window = MainWindow(target_path)
+    window.database.add_node("C:/workspace/old.md", node_type="FILE")
+    source = DatabaseManager(source_path)
+    source.init_db()
+    new_id = source.add_node("C:/workspace/new.md", node_type="FILE")
+    source.close()
+
+    backup_path = window.replace_database_file(source_path)
+
+    imported_paths = {node["path"] for node in window.database.list_nodes()}
+    assert backup_path.exists()
+    assert window.database.get_node(new_id) is not None
+    assert any(path.endswith("workspace\\new.md") or path.endswith("workspace/new.md") for path in imported_paths)
+    assert not any(path.endswith("workspace\\old.md") or path.endswith("workspace/old.md") for path in imported_paths)
     window.close()
 
 

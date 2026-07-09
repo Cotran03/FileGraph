@@ -33,6 +33,15 @@ EDGE_LABEL_MODE_ITEMS = (
     ("마우스가 올라가면 보이기", "hover"),
 )
 
+VIEW_PRESET_ITEMS = (
+    ("전체 보기", "all"),
+    ("누락 파일만", "missing"),
+    ("강조 노드 주변", "highlighted"),
+    ("최근 추가", "recent"),
+    ("선택 폴더 아래", "folder"),
+    ("고립 노드", "orphan"),
+)
+
 
 class ControlPanel(QWidget):
     addFileRequested = Signal()
@@ -44,6 +53,7 @@ class ControlPanel(QWidget):
     refreshRequested = Signal()
     checkFilesRequested = Signal()
     locateMissingRequested = Signal()
+    importDatabaseRequested = Signal()
     sampleDataRequested = Signal()
     resetLayoutRequested = Signal()
     addRelationRequested = Signal()
@@ -51,6 +61,7 @@ class ControlPanel(QWidget):
     deleteSelectedNodesRequested = Signal()
     focusDepthRequested = Signal(int)
     fullViewRequested = Signal()
+    viewPresetRequested = Signal(str)
     editRelationRequested = Signal(int)
     deleteRelationRequested = Signal(int)
     graphFontSizeChanged = Signal(int)
@@ -125,12 +136,24 @@ class ControlPanel(QWidget):
         self.search_suggestions.setVisible(False)
         action_root.addWidget(self.search_suggestions)
 
+        preset_row = QHBoxLayout()
+        preset_row.setSpacing(8)
+        self.view_preset_combo = QComboBox()
+        for text, value in VIEW_PRESET_ITEMS:
+            self.view_preset_combo.addItem(text, value)
+        self.apply_view_preset_button = QPushButton("프리셋 보기")
+        set_button_variant(self.apply_view_preset_button, "secondary")
+        preset_row.addWidget(self.view_preset_combo, 1)
+        preset_row.addWidget(self.apply_view_preset_button)
+        action_root.addLayout(preset_row)
+
         actions = QGridLayout()
         actions.setHorizontalSpacing(8)
         actions.setVerticalSpacing(8)
         self.refresh_button = QPushButton("새로고침")
         self.check_files_button = QPushButton("파일 위치 갱신")
         self.locate_missing_button = QPushButton("누락 파일 찾기")
+        self.import_db_button = QPushButton("DB 가져오기")
         self.relation_button = QPushButton("관계 추가")
         self.sample_button = QPushButton("샘플")
         self.reset_button = QPushButton("자동 정렬")
@@ -139,6 +162,7 @@ class ControlPanel(QWidget):
             self.refresh_button,
             self.check_files_button,
             self.locate_missing_button,
+            self.import_db_button,
             self.sample_button,
             self.reset_button,
         ):
@@ -152,6 +176,7 @@ class ControlPanel(QWidget):
         actions.addWidget(self.sample_button, 2, 0)
         actions.addWidget(self.reset_button, 2, 1)
         actions.addWidget(self.locate_missing_button, 3, 0, 1, 2)
+        actions.addWidget(self.import_db_button, 4, 0, 1, 2)
         action_root.addLayout(actions)
 
         self.selection_summary = QLabel("선택 노드 0개")
@@ -275,6 +300,7 @@ class ControlPanel(QWidget):
         self.refresh_button.clicked.connect(self.refreshRequested.emit)
         self.check_files_button.clicked.connect(self.checkFilesRequested.emit)
         self.locate_missing_button.clicked.connect(self.locateMissingRequested.emit)
+        self.import_db_button.clicked.connect(self.importDatabaseRequested.emit)
         self.relation_button.clicked.connect(self.addRelationRequested.emit)
         self.sample_button.clicked.connect(self.sampleDataRequested.emit)
         self.reset_button.clicked.connect(self.resetLayoutRequested.emit)
@@ -283,6 +309,7 @@ class ControlPanel(QWidget):
         self.focus_depth_input.valueChanged.connect(self._emit_focus_depth)
         self.focus_view_button.clicked.connect(self._emit_current_focus_depth)
         self.full_view_button.clicked.connect(self.fullViewRequested.emit)
+        self.apply_view_preset_button.clicked.connect(self._emit_view_preset)
         self.edit_relation_button.clicked.connect(self._emit_edit_relation)
         self.delete_relation_button.clicked.connect(self._emit_delete_relation)
         self.relation_list.itemDoubleClicked.connect(lambda _item: self._emit_edit_relation())
@@ -417,6 +444,10 @@ class ControlPanel(QWidget):
 
     def _emit_current_focus_depth(self) -> None:
         self._emit_focus_depth(self.focus_depth_input.value())
+
+    def _emit_view_preset(self) -> None:
+        preset = self.view_preset_combo.currentData(Qt.UserRole)
+        self.viewPresetRequested.emit(str(preset or "all"))
 
     def _emit_settings(self) -> None:
         ignored_dir_names = parse_ignored_dir_names(self.ignored_folders_input.text())

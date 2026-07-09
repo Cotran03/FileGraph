@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -31,6 +32,19 @@ from gui.control_panel import (
     set_combo_value,
 )
 from gui.icon_mapping_dialog import available_icon_names, icon_label
+
+
+DEFAULT_NODE_TYPE_COLORS = {
+    "FILE": "#2563EB",
+    "FOLDER": "#059669",
+}
+DEFAULT_HIGHLIGHT_COLOR_SLOTS = (
+    "#F97316",
+    "#EAB308",
+    "#22C55E",
+    "#06B6D4",
+    "#A855F7",
+)
 
 
 class SettingsDialog(QDialog):
@@ -75,13 +89,30 @@ class SettingsDialog(QDialog):
         self.file_node_color_input.setPlaceholderText("#2563EB")
         self.folder_node_color_input.setPlaceholderText("#059669")
         self.highlight_colors_input.setPlaceholderText("#F97316, #EAB308, #22C55E, #06B6D4, #A855F7")
+        self.file_node_color_preview = ColorPreview()
+        self.folder_node_color_preview = ColorPreview()
+        self.highlight_color_previews = [ColorPreview() for _index in range(5)]
         color_grid.addWidget(field_label("파일 노드"), 0, 0)
-        color_grid.addWidget(self.file_node_color_input, 0, 1)
+        color_grid.addLayout(color_input_row(self.file_node_color_input, self.file_node_color_preview), 0, 1)
         color_grid.addWidget(field_label("폴더 노드"), 1, 0)
-        color_grid.addWidget(self.folder_node_color_input, 1, 1)
+        color_grid.addLayout(color_input_row(self.folder_node_color_input, self.folder_node_color_preview), 1, 1)
         color_grid.addWidget(field_label("강조색 슬롯"), 2, 0)
         color_grid.addWidget(self.highlight_colors_input, 2, 1)
+        highlight_preview_row = QHBoxLayout()
+        highlight_preview_row.setSpacing(6)
+        for preview in self.highlight_color_previews:
+            highlight_preview_row.addWidget(preview)
+        highlight_preview_row.addStretch(1)
+        color_grid.addWidget(field_label("미리보기"), 3, 0)
+        color_grid.addLayout(highlight_preview_row, 3, 1)
+        color_actions = QHBoxLayout()
+        reset_colors_button = QPushButton("기본 색상으로 초기화")
+        set_button_variant(reset_colors_button, "secondary")
+        reset_colors_button.clicked.connect(self.reset_colors_to_defaults)
+        color_actions.addWidget(reset_colors_button)
+        color_actions.addStretch(1)
         visual_section.body.addLayout(color_grid)
+        visual_section.body.addLayout(color_actions)
         content_layout.addWidget(visual_section)
 
         icon_section = Section("확장자 아이콘")
@@ -130,6 +161,10 @@ class SettingsDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(scroll_area)
         layout.addWidget(buttons)
+        self.file_node_color_input.textChanged.connect(self.sync_color_previews)
+        self.folder_node_color_input.textChanged.connect(self.sync_color_previews)
+        self.highlight_colors_input.textChanged.connect(self.sync_color_previews)
+        self.sync_color_previews()
 
     def add_icon_mapping_row(self, extension: str, icon_name: str) -> None:
         row = self.icon_table.rowCount()
@@ -149,6 +184,19 @@ class SettingsDialog(QDialog):
         rows = sorted({index.row() for index in self.icon_table.selectedIndexes()}, reverse=True)
         for row in rows:
             self.icon_table.removeRow(row)
+
+    def reset_colors_to_defaults(self) -> None:
+        self.file_node_color_input.setText(DEFAULT_NODE_TYPE_COLORS["FILE"])
+        self.folder_node_color_input.setText(DEFAULT_NODE_TYPE_COLORS["FOLDER"])
+        self.highlight_colors_input.setText(", ".join(DEFAULT_HIGHLIGHT_COLOR_SLOTS))
+        self.sync_color_previews()
+
+    def sync_color_previews(self) -> None:
+        self.file_node_color_preview.set_color(self.file_node_color_input.text().strip())
+        self.folder_node_color_preview.set_color(self.folder_node_color_input.text().strip())
+        highlight_colors = parse_csv_values(self.highlight_colors_input.text())
+        for index, preview in enumerate(self.highlight_color_previews):
+            preview.set_color(highlight_colors[index] if index < len(highlight_colors) else "")
 
     def values(self) -> dict[str, Any]:
         return {
@@ -191,6 +239,37 @@ class Section(QFrame):
         self.body.setContentsMargins(0, 0, 0, 0)
         self.body.setSpacing(8)
         layout.addLayout(self.body)
+
+
+class ColorPreview(QLabel):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.color_value = ""
+        self.setFixedSize(26, 26)
+        self.setObjectName("colorPreview")
+        self.set_color("")
+
+    def set_color(self, value: str) -> None:
+        color = QColor(value)
+        if color.isValid():
+            self.color_value = color.name().upper()
+            self.setToolTip(self.color_value)
+            self.setStyleSheet(
+                f"border: 1px solid #94A3B8; border-radius: 5px; background: {self.color_value};"
+            )
+            return
+
+        self.color_value = ""
+        self.setToolTip("색상 없음")
+        self.setStyleSheet("border: 1px dashed #CBD5E1; border-radius: 5px; background: #FFFFFF;")
+
+
+def color_input_row(input_widget: QLineEdit, preview: ColorPreview) -> QHBoxLayout:
+    row = QHBoxLayout()
+    row.setSpacing(8)
+    row.addWidget(input_widget, 1)
+    row.addWidget(preview)
+    return row
 
 
 def settings_combo(items: tuple[tuple[str, str], ...], selected_value: str) -> QComboBox:

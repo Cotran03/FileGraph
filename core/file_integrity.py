@@ -43,10 +43,16 @@ class IntegrityScanResult:
     access_denied: int
     changed: tuple[NodeStatusChange, ...]
     hashes_updated: int = 0
+    hashes_skipped: int = 0
+    cancelled: bool = False
 
     @property
     def changed_count(self) -> int:
         return len(self.changed)
+
+    @property
+    def processed_count(self) -> int:
+        return self.active + self.missing + self.access_denied
 
 
 @dataclass(frozen=True)
@@ -64,6 +70,7 @@ class RediscoveryResult:
     eligible_missing: int
     scanned_files: int
     restored: tuple[RediscoveredNode, ...]
+    cancelled: bool = False
 
     @property
     def restored_count(self) -> int:
@@ -71,6 +78,8 @@ class RediscoveryResult:
 
 
 StatusProbe = Callable[[dict[str, Any]], str]
+CancelCallback = Callable[[], bool]
+ProgressCallback = Callable[[int, int | None, str], bool | None]
 
 
 def scan_file_statuses(
@@ -79,14 +88,21 @@ def scan_file_statuses(
     status_probe: StatusProbe | None = None,
     update_hashes: bool = True,
     max_hash_size: int = MAX_AUTO_HASH_BYTES,
+    progress_callback: ProgressCallback | None = None,
+    should_cancel: CancelCallback | None = None,
 ) -> IntegrityScanResult:
     probe = status_probe or probe_node_status
     counts = {ACTIVE: 0, MISSING: 0, ACCESS_DENIED: 0}
     changes: list[NodeStatusChange] = []
     hashes_updated = 0
+    hashes_skipped = 0
+    cancelled = False
     nodes = database.list_nodes()
 
-    for node in nodes:
+    for index, node in enumerate(nodes, start=1):
+        if should_cancel and should_cancel():
+            cancelled = True
+            break
         new_status = probe(node)
         if new_status not in VALID_SCAN_STATUSES:
             raise ValueError(f"Unsupported scanned node status: {new_status}")
@@ -106,10 +122,23 @@ def scan_file_statuses(
             )
 
         if update_hashes and new_status == ACTIVE and should_hash_node(node):
-            file_hash = compute_file_hash(node["path"], max_size=max_hash_size)
+            file_hash = compute_file_hash(
+                node["path"],
+                max_size=max_hash_size,
+                should_cancel=should_cancel,
+            )
+            if should_cancel and should_cancel():
+                cancelled = True
+                break
             if file_hash and file_hash != node.get("file_hash"):
                 database.update_node_file_hash(node["node_id"], file_hash)
                 hashes_updated += 1
+            elif file_hash is None:
+                hashes_skipped += 1
+
+        if progress_callback and progress_callback(index, len(nodes), str(node.get("name") or "")) is False:
+            cancelled = True
+            break
 
     return IntegrityScanResult(
         total=len(nodes),
@@ -118,6 +147,8 @@ def scan_file_statuses(
         access_denied=counts[ACCESS_DENIED],
         changed=tuple(changes),
         hashes_updated=hashes_updated,
+        hashes_skipped=hashes_skipped,
+        cancelled=cancelled,
     )
 
 
@@ -127,6 +158,8 @@ def rediscover_missing_nodes(
     *,
     ignored_dir_names: Iterable[str] | None = None,
     max_hash_size: int = MAX_AUTO_HASH_BYTES,
+    progress_callback: ProgressCallback | None = None,
+    should_cancel: CancelCallback | None = None,
 ) -> RediscoveryResult:
     missing_nodes = [
         node
@@ -142,6 +175,7 @@ def rediscover_missing_nodes(
     scanned_files = 0
     restored: list[RediscoveredNode] = []
     restored_node_ids: set[int] = set()
+    cancelled = False
 
     if not nodes_by_hash:
         return RediscoveryResult(
@@ -152,9 +186,22 @@ def rediscover_missing_nodes(
         )
 
     for candidate_path in iter_search_files(search_roots, ignored_dir_names=ignored_dir_names):
+        if should_cancel and should_cancel():
+            cancelled = True
+            break
         scanned_files += 1
-        candidate_hash = compute_file_hash(candidate_path, max_size=max_hash_size)
+        candidate_hash = compute_file_hash(
+            candidate_path,
+            max_size=max_hash_size,
+            should_cancel=should_cancel,
+        )
+        if should_cancel and should_cancel():
+            cancelled = True
+            break
         if not candidate_hash:
+            if progress_callback and progress_callback(scanned_files, None, str(candidate_path.name)) is False:
+                cancelled = True
+                break
             continue
 
         candidates = nodes_by_hash.get(candidate_hash, [])
@@ -186,11 +233,16 @@ def rediscover_missing_nodes(
             )
             break
 
+        if progress_callback and progress_callback(scanned_files, None, str(candidate_path.name)) is False:
+            cancelled = True
+            break
+
     return RediscoveryResult(
         total_missing=len(missing_nodes),
         eligible_missing=sum(len(nodes) for nodes in nodes_by_hash.values()),
         scanned_files=scanned_files,
         restored=tuple(restored),
+        cancelled=cancelled,
     )
 
 
@@ -253,6 +305,7 @@ def compute_file_hash(
     path: str | os.PathLike[str],
     *,
     max_size: int = MAX_AUTO_HASH_BYTES,
+    should_cancel: CancelCallback | None = None,
 ) -> str | None:
     try:
         resolved_path = Path(path)
@@ -263,6 +316,8 @@ def compute_file_hash(
         digest = hashlib.sha256()
         with resolved_path.open("rb") as file:
             for chunk in iter(lambda: file.read(HASH_CHUNK_SIZE), b""):
+                if should_cancel and should_cancel():
+                    return None
                 digest.update(chunk)
         return digest.hexdigest()
     except (OSError, PermissionError):

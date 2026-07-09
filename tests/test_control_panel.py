@@ -139,6 +139,27 @@ def test_locate_missing_button_emits_request(app):
     assert requests == [True]
 
 
+def test_import_database_button_emits_request(app):
+    panel = ControlPanel()
+    requests = []
+    panel.importDatabaseRequested.connect(lambda: requests.append(True))
+
+    panel.import_db_button.click()
+
+    assert requests == [True]
+
+
+def test_view_preset_button_emits_selected_preset(app):
+    panel = ControlPanel()
+    presets = []
+    panel.viewPresetRequested.connect(presets.append)
+
+    panel.view_preset_combo.setCurrentIndex(panel.view_preset_combo.findData("missing"))
+    panel.apply_view_preset_button.click()
+
+    assert presets == ["missing"]
+
+
 def test_settings_button_opens_separate_settings_flow(app):
     panel = ControlPanel()
     requests = []

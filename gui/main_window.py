@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import os
 import csv
+from datetime import datetime
 import json
 import random
 import shutil
+import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -12,6 +14,7 @@ from typing import Any
 from PySide6.QtCore import QObject, QPoint, QThread, Qt, Signal
 from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QColorDialog,
     QDialog,
@@ -20,6 +23,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QProgressDialog,
     QSplitter,
 )
 
@@ -87,6 +91,13 @@ NODE_CONTEXT_OPEN_NODE = "node_context_open_node"
 NODE_CONTEXT_EDIT_NOTE = "node_context_edit_note"
 NODE_CONTEXT_HIGHLIGHT_NODE = "node_context_highlight_node"
 NODE_CONTEXT_CLEAR_HIGHLIGHT = "node_context_clear_highlight"
+VIEW_PRESET_ALL = "all"
+VIEW_PRESET_MISSING = "missing"
+VIEW_PRESET_HIGHLIGHTED = "highlighted"
+VIEW_PRESET_RECENT = "recent"
+VIEW_PRESET_FOLDER = "folder"
+VIEW_PRESET_ORPHAN = "orphan"
+RECENT_VIEW_NODE_LIMIT = 30
 
 
 @dataclass(frozen=True)
@@ -96,6 +107,7 @@ class ImportPlan:
 
 
 class ImportWorker(QObject):
+    progress = Signal(int, int, str)
     finished = Signal(dict)
     failed = Signal(str)
 
@@ -104,18 +116,31 @@ class ImportWorker(QObject):
         self.db_path = db_path
         self.import_plan = import_plan
         self.action_label = action_label
+        self._cancel_requested = False
+
+    def request_cancel(self) -> None:
+        self._cancel_requested = True
 
     def run(self) -> None:
         database = DatabaseManager(self.db_path)
         try:
             database.init_db()
-            result = execute_import_plan(database, self.import_plan)
+            result = execute_import_plan(
+                database,
+                self.import_plan,
+                progress_callback=self.report_progress,
+                should_cancel=lambda: self._cancel_requested,
+            )
             result["action_label"] = self.action_label
             self.finished.emit(result)
         except Exception as exc:  # pragma: no cover - depends on filesystem/database state.
             self.failed.emit(str(exc))
         finally:
             database.close()
+
+    def report_progress(self, completed: int, total: int, label: str) -> bool:
+        self.progress.emit(completed, total, label)
+        return not self._cancel_requested
 
 
 class MainWindow(QMainWindow):
@@ -140,6 +165,7 @@ class MainWindow(QMainWindow):
         self.undo_stack: list[dict[str, Any]] = []
         self.import_worker_thread: QThread | None = None
         self.import_worker: ImportWorker | None = None
+        self.import_progress_dialog: QProgressDialog | None = None
 
         self.graph_viewer = GraphViewer()
         self.graph_viewer.set_label_font_size(self.graph_font_size)
@@ -342,11 +368,13 @@ class MainWindow(QMainWindow):
         self.control_panel.refreshRequested.connect(self.reload_graph)
         self.control_panel.checkFilesRequested.connect(self.refresh_file_statuses)
         self.control_panel.locateMissingRequested.connect(self.locate_missing_files)
+        self.control_panel.importDatabaseRequested.connect(self.import_database_file)
         self.control_panel.addRelationRequested.connect(self.add_relation)
         self.control_panel.deleteNodeRequested.connect(self.delete_node_or_selection)
         self.control_panel.deleteSelectedNodesRequested.connect(self.delete_selected_nodes_from_panel)
         self.control_panel.focusDepthRequested.connect(self.show_focus_graph)
         self.control_panel.fullViewRequested.connect(self.show_full_graph)
+        self.control_panel.viewPresetRequested.connect(self.apply_view_preset)
         self.control_panel.editRelationRequested.connect(self.edit_relation)
         self.control_panel.deleteRelationRequested.connect(self.delete_relation)
         self.control_panel.graphFontSizeChanged.connect(self.set_graph_font_size)
@@ -378,6 +406,7 @@ class MainWindow(QMainWindow):
             "Ctrl+Shift+O": self.show_orphan_nodes,
             "Ctrl+Shift+D": self.show_duplicate_candidates,
             "Ctrl+Shift+B": self.backup_database_file,
+            "Ctrl+Shift+I": self.import_database_file,
             "Ctrl+Shift+E": self.export_graph_json,
         }
         for sequence, callback in shortcut_map.items():
@@ -389,6 +418,165 @@ class MainWindow(QMainWindow):
         self.control_panel.clear_search()
         self.reload_graph()
         self.statusBar().showMessage("전체 그래프를 표시합니다.", 2500)
+
+    def apply_view_preset(self, preset: str) -> None:
+        preset = str(preset or VIEW_PRESET_ALL)
+        if preset == VIEW_PRESET_ALL:
+            self.show_full_graph()
+            return
+        if preset == VIEW_PRESET_MISSING:
+            nodes = [
+                node
+                for node in self.database.list_nodes()
+                if str(node.get("status") or "").upper() == "MISSING"
+            ]
+            self.render_node_subset_view(
+                nodes,
+                title="누락 파일만",
+                empty_message="누락 상태의 노드가 없습니다.",
+            )
+            return
+        if preset == VIEW_PRESET_HIGHLIGHTED:
+            nodes, relations = self.highlighted_neighborhood()
+            self.render_node_subset_view(
+                nodes,
+                relations=relations,
+                title="강조 노드 주변",
+                empty_message="강조 색상이 지정된 노드가 없습니다.",
+            )
+            return
+        if preset == VIEW_PRESET_RECENT:
+            nodes = sorted(
+                self.database.list_nodes(),
+                key=lambda node: str(node.get("created_at") or ""),
+                reverse=True,
+            )[:RECENT_VIEW_NODE_LIMIT]
+            self.render_node_subset_view(
+                nodes,
+                title="최근 추가",
+                empty_message="최근 추가한 노드가 없습니다.",
+            )
+            return
+        if preset == VIEW_PRESET_FOLDER:
+            self.show_selected_folder_subtree()
+            return
+        if preset == VIEW_PRESET_ORPHAN:
+            self.show_orphan_nodes()
+            return
+        self.statusBar().showMessage("알 수 없는 보기 프리셋입니다.", 1800)
+
+    def render_node_subset_view(
+        self,
+        nodes: list[dict[str, Any]],
+        *,
+        title: str,
+        empty_message: str,
+        relations: list[dict[str, Any]] | None = None,
+    ) -> None:
+        if not nodes:
+            data = self.graph_manager.get_graph_data(nodes=[], relations=[], use_saved_layout=False)
+            data = self.prepare_graph_data(data)
+            self.current_graph_data = data
+            self.graph_viewer.render_graph(data)
+            self.control_panel.set_selected_node_count(0)
+            self.control_panel.set_summary(0, 0)
+            self.selected_node = None
+            self.control_panel.show_node(None)
+            self.control_panel.show_relations([])
+            self.statusBar().showMessage(empty_message, 2500)
+            return
+
+        node_ids = {int(node["node_id"]) for node in nodes}
+        visible_relations = relations if relations is not None else self.relations_between_node_ids(node_ids)
+        data = self.graph_manager.get_graph_data(
+            nodes=nodes,
+            relations=visible_relations,
+            scale=SEARCH_LAYOUT_SCALE,
+            use_saved_layout=False,
+        )
+        data = self.prepare_graph_data(data)
+        self.current_graph_data = data
+        self.graph_viewer.render_graph(data)
+        self.control_panel.set_selected_node_count(len(self.graph_viewer.selected_node_ids()))
+        self.control_panel.set_summary(len(data["nodes"]), len(data["relations"]))
+        if self.selected_node and int(self.selected_node["node_id"]) in node_ids:
+            refreshed = self.database.get_node(int(self.selected_node["node_id"]))
+            self.selected_node = refreshed
+            self.control_panel.show_node(refreshed)
+            if refreshed:
+                self.control_panel.show_relations(relations_for_node_in_graph_data(data, refreshed["node_id"]))
+            else:
+                self.control_panel.show_relations(data["relations"])
+        else:
+            self.selected_node = None
+            self.control_panel.show_node(None)
+            self.control_panel.show_relations(data["relations"])
+        self.statusBar().showMessage(f"{title}: 노드 {len(data['nodes'])}개, 관계 {len(data['relations'])}개", 2500)
+
+    def relations_between_node_ids(self, node_ids: set[int]) -> list[dict[str, Any]]:
+        return [
+            relation
+            for relation in self.database.list_relations()
+            if int(relation["source_id"]) in node_ids
+            and int(relation["target_id"]) in node_ids
+        ]
+
+    def highlighted_neighborhood(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        all_nodes = self.database.list_nodes()
+        nodes_by_id = {int(node["node_id"]): node for node in all_nodes}
+        highlighted_ids = {
+            int(node["node_id"])
+            for node in all_nodes
+            if str(node.get("highlight_color") or "").strip()
+        }
+        if not highlighted_ids:
+            return [], []
+
+        visible_ids = set(highlighted_ids)
+        visible_relations: list[dict[str, Any]] = []
+        for relation in self.database.list_relations():
+            source_id = int(relation["source_id"])
+            target_id = int(relation["target_id"])
+            if source_id in highlighted_ids or target_id in highlighted_ids:
+                visible_ids.add(source_id)
+                visible_ids.add(target_id)
+                visible_relations.append(relation)
+
+        return [nodes_by_id[node_id] for node_id in visible_ids if node_id in nodes_by_id], visible_relations
+
+    def show_selected_folder_subtree(self) -> None:
+        if not self.selected_node or self.selected_node.get("node_type") != "FOLDER":
+            QMessageBox.information(self, "선택 폴더 아래", "먼저 폴더 노드를 선택해 주세요.")
+            return
+
+        folder_id = int(self.selected_node["node_id"])
+        visible_ids = self.folder_subtree_node_ids(folder_id)
+        nodes_by_id = {int(node["node_id"]): node for node in self.database.list_nodes()}
+        nodes = [nodes_by_id[node_id] for node_id in visible_ids if node_id in nodes_by_id]
+        self.render_node_subset_view(
+            nodes,
+            title="선택 폴더 아래",
+            empty_message="선택한 폴더 아래에 표시할 노드가 없습니다.",
+        )
+        if folder_id in self.graph_viewer.node_items:
+            self.graph_viewer.focus_node(folder_id)
+
+    def folder_subtree_node_ids(self, folder_id: int) -> set[int]:
+        children_by_folder: dict[int, set[int]] = {}
+        for relation in self.database.list_relations():
+            if relation.get("relation_type_code") != "CONTAINS":
+                continue
+            children_by_folder.setdefault(int(relation["source_id"]), set()).add(int(relation["target_id"]))
+
+        visible_ids = {folder_id}
+        pending = list(children_by_folder.get(folder_id, set()))
+        while pending:
+            node_id = pending.pop()
+            if node_id in visible_ids:
+                continue
+            visible_ids.add(node_id)
+            pending.extend(children_by_folder.get(node_id, set()))
+        return visible_ids
 
     def focus_search_input(self) -> None:
         self.search_input.setFocus(Qt.ShortcutFocusReason)
@@ -434,6 +622,7 @@ class MainWindow(QMainWindow):
                     "Ctrl+Shift+O: 고립 노드 보기",
                     "Ctrl+Shift+D: 중복 후보 보기",
                     "Ctrl+Shift+B: DB 백업",
+                    "Ctrl+Shift+I: DB 가져오기",
                     "Ctrl+Shift+E: JSON 내보내기",
                 ]
             ),
@@ -498,6 +687,120 @@ class MainWindow(QMainWindow):
         self.database.conn.commit()
         shutil.copy2(self.database.db_path, target_path)
         self.statusBar().showMessage(f"DB를 백업했습니다: {target_path}", 3500)
+
+    def import_database_file(self) -> None:
+        if str(self.database.db_path) == ":memory:":
+            QMessageBox.information(self, "DB 가져오기", "메모리 DB는 가져오기로 교체할 수 없습니다.")
+            return
+
+        source_path, _filter = QFileDialog.getOpenFileName(
+            self,
+            "DB 가져오기",
+            "",
+            "SQLite DB (*.db *.sqlite *.sqlite3)",
+        )
+        if not source_path:
+            return
+
+        source = Path(source_path)
+        is_valid, message = validate_filegraph_database(source)
+        if not is_valid:
+            QMessageBox.warning(self, "DB 가져오기 실패", message)
+            return
+
+        target = Path(self.database.db_path)
+        if source.resolve(strict=False) == target.resolve(strict=False):
+            QMessageBox.information(self, "DB 가져오기", "현재 사용 중인 DB와 같은 파일입니다.")
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "DB 가져오기",
+            (
+                "현재 DB를 선택한 DB로 교체할까요?\n"
+                "교체 전에 현재 DB는 같은 폴더에 자동 백업됩니다."
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        try:
+            backup_path = self.replace_database_file(source)
+        except OSError as exc:
+            QMessageBox.warning(self, "DB 가져오기 실패", str(exc))
+            return
+
+        self.statusBar().showMessage(f"DB를 가져왔습니다. 이전 DB 백업: {backup_path}", 5000)
+
+    def replace_database_file(self, source_path: str | os.PathLike[str]) -> Path:
+        source = Path(source_path)
+        target = Path(self.database.db_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        self.database.conn.commit()
+        backup_path = database_preimport_backup_path(target)
+        importing_path = database_importing_path(target)
+        shutil.copy2(target, backup_path)
+        try:
+            shutil.copy2(source, importing_path)
+        except OSError:
+            try:
+                importing_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+        self.database.close()
+        try:
+            os.replace(importing_path, target)
+        except OSError:
+            self.database.connect()
+            try:
+                importing_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+        self.database.init_db()
+        self.graph_manager = GraphManager(self.database)
+        self.selected_node = None
+        self.collapsed_folder_node_ids.clear()
+        self.reload_runtime_settings()
+        self.reload_graph()
+        return backup_path
+
+    def reload_runtime_settings(self) -> None:
+        self.graph_font_size = self._load_graph_font_size()
+        self.node_label_mode = self._load_node_label_mode()
+        self.edge_label_mode = self._load_edge_label_mode()
+        self.ignored_dir_names = self._load_ignored_dir_names()
+        self.extension_icon_overrides = self._load_json_setting(EXTENSION_ICON_OVERRIDES_SETTING, {})
+        self.node_type_colors = self._load_node_type_colors()
+        self.highlight_color_slots = self._load_highlight_color_slots()
+        self.graph_viewer.set_label_font_size(self.graph_font_size)
+        self.graph_viewer.set_label_visibility_modes(
+            node_mode=self.node_label_mode,
+            edge_mode=self.edge_label_mode,
+        )
+        self.graph_viewer.set_extension_icon_overrides(self.extension_icon_overrides)
+        self.control_panel.set_graph_font_size(self.graph_font_size)
+        self.control_panel.set_settings(
+            ignored_dir_names=sorted(self.ignored_dir_names),
+            node_label_mode=self.node_label_mode,
+            edge_label_mode=self.edge_label_mode,
+            visual_settings=self.visual_settings(),
+        )
+
+    def create_progress_dialog(self, title: str, label: str, *, maximum: int) -> QProgressDialog:
+        progress = QProgressDialog(label, "취소", 0, maximum, self)
+        progress.setWindowTitle(title)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.setValue(0)
+        progress.show()
+        QApplication.processEvents()
+        return progress
 
     def export_graph_json(self) -> None:
         target_path, _filter = QFileDialog.getSaveFileName(self, "JSON 내보내기", "filegraph_export.json", "JSON (*.json)")
@@ -651,11 +954,40 @@ class MainWindow(QMainWindow):
             for node in nodes
         ]
 
-    def scan_file_statuses(self) -> IntegrityScanResult:
-        return scan_database_file_statuses(self.database)
+    def scan_file_statuses(
+        self,
+        *,
+        progress_callback=None,
+        should_cancel=None,
+    ) -> IntegrityScanResult:
+        return scan_database_file_statuses(
+            self.database,
+            progress_callback=progress_callback,
+            should_cancel=should_cancel,
+        )
 
     def refresh_file_statuses(self) -> None:
-        result = self.scan_file_statuses()
+        total_nodes = len(self.database.list_nodes())
+        progress = self.create_progress_dialog(
+            "파일 위치 갱신",
+            "파일 위치와 해시를 확인하는 중...",
+            maximum=max(1, total_nodes),
+        )
+
+        def report_progress(completed: int, total: int | None, label: str) -> bool:
+            total_count = total or total_nodes or 1
+            progress.setRange(0, max(1, total_count))
+            progress.setValue(min(completed, max(1, total_count)))
+            detail = f"\n{label}" if label else ""
+            progress.setLabelText(f"파일 위치와 해시를 확인하는 중... {completed}/{total_count}{detail}")
+            QApplication.processEvents()
+            return not progress.wasCanceled()
+
+        result = self.scan_file_statuses(
+            progress_callback=report_progress,
+            should_cancel=progress.wasCanceled,
+        )
+        progress.close()
         self.reload_graph()
         self.statusBar().showMessage(integrity_scan_status_message(result), 3500)
 
@@ -666,11 +998,27 @@ class MainWindow(QMainWindow):
         self.rediscover_missing_files([folder_path])
 
     def rediscover_missing_files(self, search_roots: list[str | os.PathLike[str]]) -> RediscoveryResult:
+        progress = self.create_progress_dialog(
+            "누락 파일 찾기",
+            "해시가 같은 파일을 찾는 중...",
+            maximum=0,
+        )
+
+        def report_progress(scanned: int, _total: int | None, label: str) -> bool:
+            progress.setRange(0, 0)
+            detail = f"\n{label}" if label else ""
+            progress.setLabelText(f"해시가 같은 파일을 찾는 중... 검사 {scanned}개{detail}")
+            QApplication.processEvents()
+            return not progress.wasCanceled()
+
         result = rediscover_missing_nodes(
             self.database,
             search_roots,
             ignored_dir_names=self.ignored_dir_names,
+            progress_callback=report_progress,
+            should_cancel=progress.wasCanceled,
         )
+        progress.close()
         self.reload_graph()
         self.statusBar().showMessage(rediscovery_status_message(result), 3500)
         return result
@@ -891,15 +1239,41 @@ class MainWindow(QMainWindow):
         self.import_worker = ImportWorker(self.database.db_path, import_plan, action_label)
         self.import_worker.moveToThread(self.import_worker_thread)
         self.import_worker_thread.started.connect(self.import_worker.run)
+        self.import_worker.progress.connect(self.on_background_import_progress)
         self.import_worker.finished.connect(self.on_background_import_finished)
         self.import_worker.failed.connect(self.on_background_import_failed)
         self.import_worker.finished.connect(self.import_worker_thread.quit)
         self.import_worker.failed.connect(self.import_worker_thread.quit)
         self.import_worker_thread.finished.connect(self.clear_background_import_worker)
+        total_steps = import_plan_step_count(import_plan)
+        self.import_progress_dialog = self.create_progress_dialog(
+            f"{action_label} 추가",
+            f"{action_label} {len(import_plan.entries)}개를 백그라운드에서 추가하는 중...",
+            maximum=max(1, total_steps),
+        )
+        self.import_progress_dialog.canceled.connect(self.request_background_import_cancel)
         self.import_worker_thread.start()
         self.statusBar().showMessage(f"{action_label} {len(import_plan.entries)}개를 백그라운드에서 추가합니다.", 3500)
 
+    def request_background_import_cancel(self) -> None:
+        if self.import_worker is not None:
+            self.import_worker.request_cancel()
+        if self.import_progress_dialog is not None:
+            self.import_progress_dialog.setLabelText("취소 요청을 처리하는 중...")
+
+    def on_background_import_progress(self, completed: int, total: int, label: str) -> None:
+        if self.import_progress_dialog is None:
+            return
+        total_count = max(1, int(total))
+        self.import_progress_dialog.setRange(0, total_count)
+        self.import_progress_dialog.setValue(min(int(completed), total_count))
+        detail = f"\n{label}" if label else ""
+        self.import_progress_dialog.setLabelText(
+            f"경로를 등록하는 중... {completed}/{total_count}{detail}"
+        )
+
     def on_background_import_finished(self, result: dict[str, Any]) -> None:
+        self.close_import_progress_dialog()
         self.reload_graph()
         selected_id = result.get("selected_id")
         if selected_id is not None:
@@ -908,7 +1282,10 @@ class MainWindow(QMainWindow):
             self.control_panel.show_node(self.selected_node)
             self.control_panel.show_relations(self.database.list_relations(node_id=int(selected_id)))
         action_label = result.get("action_label", "경로")
-        message = f"{action_label} {len(result.get('added_ids', []))}개 추가 완료"
+        if result.get("cancelled"):
+            message = f"{action_label} 추가 취소됨: {len(result.get('added_ids', []))}개 추가"
+        else:
+            message = f"{action_label} {len(result.get('added_ids', []))}개 추가 완료"
         contains_relation_count = int(result.get("contains_relation_count") or 0)
         duplicate_count = int(result.get("duplicate_count") or 0)
         if contains_relation_count:
@@ -918,7 +1295,14 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(message, 4500)
 
     def on_background_import_failed(self, message: str) -> None:
+        self.close_import_progress_dialog()
         QMessageBox.warning(self, "백그라운드 추가 실패", message)
+
+    def close_import_progress_dialog(self) -> None:
+        if self.import_progress_dialog is not None:
+            self.import_progress_dialog.close()
+            self.import_progress_dialog.deleteLater()
+            self.import_progress_dialog = None
 
     def clear_background_import_worker(self) -> None:
         self.import_worker = None
@@ -1702,12 +2086,15 @@ def relations_for_node_in_graph_data(
 def integrity_scan_status_message(result: IntegrityScanResult) -> str:
     if result.total == 0:
         return "확인할 노드가 없습니다."
+    prefix = "파일 위치 갱신 취소됨" if result.cancelled else "파일 위치 갱신"
     message = (
-        f"파일 위치 갱신: {result.total}개 확인, 변경 {result.changed_count}개 "
+        f"{prefix}: {result.total}개 중 {result.processed_count}개 확인, 변경 {result.changed_count}개 "
         f"(정상 {result.active}, 누락 {result.missing}, 접근 거부 {result.access_denied})"
     )
     if result.hashes_updated:
         message += f", 변경 감지 정보 갱신 {result.hashes_updated}개"
+    if result.hashes_skipped:
+        message += f", 해시 건너뜀 {result.hashes_skipped}개"
     return message
 
 
@@ -1716,10 +2103,12 @@ def rediscovery_status_message(result: RediscoveryResult) -> str:
         return "복구할 누락 노드가 없습니다."
     if result.eligible_missing == 0:
         return "해시가 저장된 누락 파일이 없습니다."
-    return (
-        f"누락 파일 찾기: 후보 {result.eligible_missing}개, "
-        f"검사 {result.scanned_files}개, 복구 {result.restored_count}개"
-    )
+    skipped = result.total_missing - result.eligible_missing
+    prefix = "누락 파일 찾기 취소됨" if result.cancelled else "누락 파일 찾기"
+    message = f"{prefix}: 후보 {result.eligible_missing}개, 검사 {result.scanned_files}개, 복구 {result.restored_count}개"
+    if skipped:
+        message += f", 해시 없음 {skipped}개"
+    return message
 
 
 def count_folder_paths(paths: list[str]) -> int:
@@ -1739,13 +2128,25 @@ def expand_import_paths(
     ).entries
 
 
-def execute_import_plan(database: DatabaseManager, import_plan: ImportPlan) -> dict[str, Any]:
+def execute_import_plan(
+    database: DatabaseManager,
+    import_plan: ImportPlan,
+    *,
+    progress_callback=None,
+    should_cancel=None,
+) -> dict[str, Any]:
     added_ids: list[int] = []
     node_ids_by_path: dict[str, int] = {}
     duplicate_count = 0
     first_duplicate: dict[str, Any] | None = None
+    completed_steps = 0
+    total_steps = import_plan_step_count(import_plan)
+    cancelled = False
 
     for path, node_type in import_plan.entries:
+        if should_cancel and should_cancel():
+            cancelled = True
+            break
         try:
             node_id = database.add_node(path, node_type=node_type)
             added_ids.append(node_id)
@@ -1755,12 +2156,36 @@ def execute_import_plan(database: DatabaseManager, import_plan: ImportPlan) -> d
                 first_duplicate = exc.existing_node
             node_id = int(exc.existing_node["node_id"])
         node_ids_by_path[path] = node_id
+        completed_steps += 1
+        if progress_callback and progress_callback(completed_steps, total_steps, Path(path).name) is False:
+            cancelled = True
+            break
 
-    contains_relation_count = add_default_contains_relations(
-        database,
-        import_plan.contains_pairs,
-        node_ids_by_path,
-    )
+    contains_relation_count = 0
+    if not cancelled:
+        for folder_path, file_path in import_plan.contains_pairs:
+            if should_cancel and should_cancel():
+                cancelled = True
+                break
+            source_id = node_ids_by_path.get(folder_path)
+            target_id = node_ids_by_path.get(file_path)
+            if source_id is not None and target_id is not None:
+                try:
+                    database.add_relation(
+                        source_id,
+                        target_id,
+                        relation_type_code="CONTAINS",
+                        strength="HIGH",
+                    )
+                except DuplicateRelationError:
+                    pass
+                else:
+                    contains_relation_count += 1
+            completed_steps += 1
+            if progress_callback and progress_callback(completed_steps, total_steps, Path(file_path).name) is False:
+                cancelled = True
+                break
+
     selected_id: int | None = None
     if import_plan.contains_pairs:
         selected_id = node_ids_by_path.get(import_plan.contains_pairs[0][0])
@@ -1774,7 +2199,14 @@ def execute_import_plan(database: DatabaseManager, import_plan: ImportPlan) -> d
         "first_duplicate": first_duplicate,
         "contains_relation_count": contains_relation_count,
         "selected_id": selected_id,
+        "processed_count": completed_steps,
+        "total_count": total_steps,
+        "cancelled": cancelled,
     }
+
+
+def import_plan_step_count(import_plan: ImportPlan) -> int:
+    return len(import_plan.entries) + len(import_plan.contains_pairs)
 
 
 def add_default_contains_relations(
@@ -1874,6 +2306,46 @@ def normalize_ignored_dir_names(names) -> set[str]:
 
 def is_valid_color(value: str) -> bool:
     return QColor(value).isValid()
+
+
+def validate_filegraph_database(path: str | os.PathLike[str]) -> tuple[bool, str]:
+    database_path = Path(path)
+    if not database_path.is_file():
+        return False, "선택한 DB 파일을 찾을 수 없습니다."
+
+    required_tables = {"nodes", "relations", "relation_types", "settings"}
+    try:
+        connection = sqlite3.connect(database_path)
+        try:
+            rows = connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+        finally:
+            connection.close()
+    except sqlite3.DatabaseError:
+        return False, "SQLite DB 파일이 아니거나 파일이 손상되었습니다."
+    except OSError as exc:
+        return False, str(exc)
+
+    table_names = {str(row[0]) for row in rows}
+    missing_tables = sorted(required_tables - table_names)
+    if missing_tables:
+        return False, f"FileGraph DB에 필요한 테이블이 없습니다: {', '.join(missing_tables)}"
+    return True, ""
+
+
+def database_preimport_backup_path(target_path: Path) -> Path:
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    candidate = target_path.with_name(f"{target_path.stem}.preimport-{timestamp}{target_path.suffix}")
+    suffix_index = 1
+    while candidate.exists():
+        candidate = target_path.with_name(
+            f"{target_path.stem}.preimport-{timestamp}-{suffix_index}{target_path.suffix}"
+        )
+        suffix_index += 1
+    return candidate
+
+
+def database_importing_path(target_path: Path) -> Path:
+    return target_path.with_name(f"{target_path.name}.importing")
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:

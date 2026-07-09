@@ -66,6 +66,22 @@ def test_scan_file_statuses_stores_hash_for_active_files(database):
     assert database.get_node(node_id)["file_hash"] == compute_file_hash(file_path)
 
 
+def test_scan_file_statuses_can_cancel_after_progress_callback(database):
+    database.add_node(unique_missing_path("first"), node_type="FILE")
+    second_id = database.add_node(unique_missing_path("second"), node_type="FILE")
+
+    result = scan_file_statuses(
+        database,
+        status_probe=lambda _node: MISSING,
+        update_hashes=False,
+        progress_callback=lambda completed, _total, _label: completed < 1,
+    )
+
+    assert result.cancelled is True
+    assert result.processed_count == 1
+    assert database.get_node(second_id)["status"] == ACTIVE
+
+
 def test_rediscover_missing_nodes_restores_path_by_hash(database):
     found_path = Path("README.md").resolve(strict=True)
     file_hash = compute_file_hash(found_path)
