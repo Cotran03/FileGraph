@@ -230,6 +230,13 @@ PyInstaller 등으로 빌드된 실행 환경에서는 `%LOCALAPPDATA%/FileGraph
 
 최초 실행 시 `db/template_db.db`가 존재하고 런타임 DB가 없다면 복사합니다.
 
+릴리즈 패키징:
+
+- Windows 배포판은 PyInstaller 산출물인 `dist/FileGraph/` 폴더 전체를 zip으로 묶는다.
+- GitHub Release asset 이름은 `FileGraph-vX.Y.Z-windows-x64.zip` 형식을 사용한다.
+- GitHub가 자동으로 제공하는 `Source code (zip)`은 개발자용 소스 코드이며 일반 실행용 배포 파일로 안내하지 않는다.
+- 사용자는 배포 zip을 내려받아 압축을 풀고 `FileGraph.exe`를 실행한다. Python, PySide6, PyInstaller, 소스 checkout은 필요하지 않다.
+
 DB 백업/가져오기:
 
 - DB 백업은 현재 SQLite DB 파일을 사용자가 선택한 `.db` 파일로 복사한다.

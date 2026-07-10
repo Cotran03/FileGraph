@@ -4,6 +4,14 @@
 
 ## 실행
 
+### 배포판 실행
+
+[GitHub Releases](https://github.com/Cotran03/FileGraph/releases)에서 `FileGraph-v0.1.0-windows-x64.zip`을 다운로드하고 압축을 푼 뒤 `FileGraph.exe`를 실행합니다.
+
+GitHub가 자동으로 제공하는 `Source code (zip)`은 개발자용 소스 코드입니다. 일반 사용자는 Windows용 zip 배포 파일을 받으면 별도 빌드 없이 실행할 수 있습니다.
+
+### 개발 환경 실행
+
 개발 환경에서는 저장소 루트에서 다음 명령을 실행합니다.
 
 ```powershell
