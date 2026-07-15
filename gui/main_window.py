@@ -856,7 +856,7 @@ class MainWindow(QMainWindow):
         data = self.graph_manager.get_graph_data()
         data = self.prepare_graph_data(data)
         self.current_graph_data = data
-        self.graph_viewer.render_graph(data)
+        self.graph_viewer.render_graph(data, preserve_view=True)
         self.control_panel.set_selected_node_count(len(self.graph_viewer.selected_node_ids()))
         self.control_panel.set_summary(len(data["nodes"]), len(data["relations"]))
         if self.selected_node:
@@ -898,12 +898,17 @@ class MainWindow(QMainWindow):
         )
 
     def approve_relationship_candidate(self, candidate_id: int) -> None:
+        candidate = self.database.get_relationship_candidate(candidate_id)
         try:
             self.database.approve_relationship_candidate(candidate_id)
         except (ValueError, DuplicateRelationError) as exc:
             QMessageBox.warning(self, "후보 승인 실패", str(exc))
             return
         self.reload_graph()
+        if candidate is not None:
+            self.graph_viewer.focus_nodes(
+                [int(candidate["source_node_id"]), int(candidate["target_node_id"])]
+            )
         self.statusBar().showMessage("관계 후보를 승인했습니다.", 2500)
 
     def reject_relationship_candidate(self, candidate_id: int) -> None:

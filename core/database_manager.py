@@ -594,6 +594,13 @@ class DatabaseManager:
         ).fetchall()
         return rows_to_dicts(rows)
 
+    def get_relationship_candidate(self, candidate_id: int) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT * FROM relationship_candidates WHERE candidate_id = ?",
+            (candidate_id,),
+        ).fetchone()
+        return row_to_dict(row)
+
     def approve_relationship_candidate(self, candidate_id: int) -> int:
         candidate = self.conn.execute(
             "SELECT * FROM relationship_candidates WHERE candidate_id = ?",

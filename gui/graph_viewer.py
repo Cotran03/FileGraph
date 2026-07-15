@@ -343,7 +343,15 @@ class GraphViewer(QGraphicsView):
             return
         super().dropEvent(event)
 
-    def render_graph(self, graph_data: dict[str, list[dict[str, Any]]]) -> None:
+    def render_graph(
+        self,
+        graph_data: dict[str, list[dict[str, Any]]],
+        *,
+        preserve_view: bool = False,
+    ) -> None:
+        previous_center = self.mapToScene(self.viewport().rect().center())
+        previous_transform = self.transform()
+        can_preserve_view = preserve_view and bool(self.node_items)
         signals_were_blocked = self.scene.blockSignals(True)
         try:
             self.node_items.clear()
@@ -370,7 +378,15 @@ class GraphViewer(QGraphicsView):
 
         if nodes:
             self.position_node_labels()
-            self.fit_graph_to_view()
+            if can_preserve_view:
+                graph_rect = self.graph_items_bounding_rect()
+                padding = graph_fit_padding(graph_rect)
+                scene_rect = graph_rect.adjusted(-padding, -padding, padding, padding)
+                self.scene.setSceneRect(expand_rect_to_minimum_size(scene_rect, MIN_GRAPH_FIT_SIZE))
+                self.setTransform(previous_transform)
+                self.centerOn(previous_center)
+            else:
+                self.fit_graph_to_view()
         else:
             self.scene.setSceneRect(-400, -300, 800, 600)
             self.resetTransform()
@@ -387,6 +403,15 @@ class GraphViewer(QGraphicsView):
             return
         self.centerOn(item)
         item.setSelected(True)
+
+    def focus_nodes(self, node_ids: list[int] | tuple[int, ...]) -> None:
+        items = [self.node_items[node_id] for node_id in node_ids if node_id in self.node_items]
+        if not items:
+            return
+        focus_rect = items[0].sceneBoundingRect()
+        for item in items[1:]:
+            focus_rect = focus_rect.united(item.sceneBoundingRect())
+        self.centerOn(focus_rect.center())
 
     def fit_graph_to_view(self) -> None:
         graph_rect = self.graph_items_bounding_rect()

@@ -563,6 +563,34 @@ def test_manual_overlap_resolution_moves_single_node_to_non_overlapping_position
     assert distance >= viewer.node_items[1].radius + moved_node.radius + MANUAL_NODE_GAP - 1e-6
 
 
+def test_render_graph_can_preserve_zoom_and_center(app):
+    viewer = GraphViewer()
+    viewer.resize(800, 600)
+    viewer.show()
+    data = {
+        "nodes": [
+            {"node_id": 1, "name": "first.md", "node_type": "FILE", "status": "ACTIVE", "x": -300, "y": 0},
+            {"node_id": 2, "name": "second.md", "node_type": "FILE", "status": "ACTIVE", "x": 300, "y": 0},
+        ],
+        "relations": [],
+    }
+    viewer.render_graph(data)
+    viewer.scale(1.4, 1.4)
+    viewer.centerOn(180, 0)
+    app.processEvents()
+    previous_scale = viewer.transform().m11()
+    previous_center = viewer.mapToScene(viewer.viewport().rect().center())
+
+    viewer.render_graph(data, preserve_view=True)
+    app.processEvents()
+    restored_center = viewer.mapToScene(viewer.viewport().rect().center())
+
+    assert viewer.transform().m11() == pytest.approx(previous_scale)
+    assert restored_center.x() == pytest.approx(previous_center.x(), abs=2.0)
+    assert restored_center.y() == pytest.approx(previous_center.y(), abs=2.0)
+    viewer.close()
+
+
 class FakeContextMenuEvent:
     def __init__(self, screen_position: QPoint) -> None:
         self.screen_position = screen_position

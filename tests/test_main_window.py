@@ -111,6 +111,28 @@ def test_candidate_panel_keeps_global_recommendations_when_unrelated_node_is_sel
     window.close()
 
 
+def test_approving_candidate_moves_view_to_related_nodes(app, monkeypatch):
+    window = MainWindow(":memory:")
+    source_id = window.database.add_node("C:/workspace/analysis.py", node_type="FILE")
+    target_id = window.database.add_node("C:/workspace/data.csv", node_type="FILE")
+    candidate_id = window.database.add_relationship_candidate(
+        source_id,
+        target_id,
+        "READS",
+        confidence=0.95,
+        detector="test",
+        evidence="analysis.py:1",
+    )
+    focused = []
+    monkeypatch.setattr(window.graph_viewer, "focus_nodes", lambda node_ids: focused.append(node_ids))
+
+    window.approve_relationship_candidate(candidate_id)
+
+    assert focused == [[source_id, target_id]]
+    assert window.database.list_relationship_candidates() == []
+    window.close()
+
+
 def test_root_folder_annotation_marks_folders_without_parent(app):
     window = MainWindow(":memory:")
     root_id = window.database.add_node("C:/workspace", node_type="FOLDER")
