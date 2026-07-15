@@ -743,6 +743,25 @@ def test_folder_context_menu_toggles_contained_file_nodes(app):
     window.close()
 
 
+def test_expanding_moved_folder_translates_contained_file_positions(app):
+    window = MainWindow(":memory:")
+    folder_id = window.database.add_node("C:/workspace/assets", node_type="FOLDER")
+    file_id = window.database.add_node("C:/workspace/assets/logo.png", node_type="FILE")
+    window.database.add_relation(folder_id, file_id, relation_type_code="CONTAINS", strength="HIGH")
+    window.database.update_node_layouts({folder_id: (0.0, 0.0), file_id: (120.0, 40.0)})
+    window.reload_graph()
+
+    window.toggle_folder_contents(folder_id)
+    window.graph_viewer.node_items[folder_id].setPos(300.0, 200.0)
+    window.on_node_moved(folder_id, 300.0, 200.0)
+    window.toggle_folder_contents(folder_id)
+
+    moved_file = window.database.get_node(file_id)
+    assert moved_file["layout_x"] == pytest.approx(420.0)
+    assert moved_file["layout_y"] == pytest.approx(240.0)
+    window.close()
+
+
 def test_focus_graph_respects_collapsed_folder_contents(app):
     window = MainWindow(":memory:")
     folder_id = window.database.add_node("C:/workspace/assets", node_type="FOLDER")

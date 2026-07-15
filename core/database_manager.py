@@ -563,6 +563,17 @@ class DatabaseManager:
         self.conn.commit()
         return int(cursor.lastrowid) if cursor.rowcount else None
 
+    def update_node_layouts(self, positions: dict[int, tuple[float, float]]) -> None:
+        self.conn.executemany(
+            """
+            UPDATE nodes
+            SET layout_x = ?, layout_y = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE node_id = ?
+            """,
+            [(x, y, node_id) for node_id, (x, y) in positions.items()],
+        )
+        self.conn.commit()
+
     def list_relationship_candidates(
         self,
         *,

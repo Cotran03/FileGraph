@@ -591,6 +591,43 @@ def test_render_graph_can_preserve_zoom_and_center(app):
     viewer.close()
 
 
+def test_parallel_relations_between_same_nodes_are_visually_separated(app):
+    viewer = GraphViewer()
+    viewer.render_graph(
+        {
+            "nodes": [
+                {"node_id": 1, "name": "a.py", "node_type": "FILE", "status": "ACTIVE", "x": 0, "y": 0},
+                {"node_id": 2, "name": "b.csv", "node_type": "FILE", "status": "ACTIVE", "x": 200, "y": 0},
+            ],
+            "relations": [
+                {
+                    "relation_id": 1,
+                    "source_id": 1,
+                    "target_id": 2,
+                    "relation_type_name": "읽음",
+                    "relation_type_color": "#2563EB",
+                    "is_directional": True,
+                    "strength": "HIGH",
+                },
+                {
+                    "relation_id": 2,
+                    "source_id": 1,
+                    "target_id": 2,
+                    "relation_type_name": "관련 있음",
+                    "relation_type_color": "#64748B",
+                    "is_directional": False,
+                    "strength": "MEDIUM",
+                },
+            ],
+        }
+    )
+
+    first_line = viewer.edge_items[0].line()
+    second_line = viewer.edge_items[1].line()
+    assert first_line.y1() != second_line.y1()
+    assert first_line.y2() != second_line.y2()
+
+
 class FakeContextMenuEvent:
     def __init__(self, screen_position: QPoint) -> None:
         self.screen_position = screen_position

@@ -19,7 +19,7 @@ db/*.db-*
 !db/template_db.db
 logs/
 *.log
-config/settings.json
+config/settings.jsons
 config/*.local.*
 config/.env*
 config/*secret*
@@ -39,3 +39,6 @@ FileGraph-v*-windows-*.zip
 
 # Local agent metadata
 /.agents
+
+PROJECT_OVERVIEW.md
+NEW_IDEA.md

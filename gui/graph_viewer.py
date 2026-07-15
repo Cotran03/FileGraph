@@ -369,12 +369,18 @@ class GraphViewer(QGraphicsView):
             self.scene.addItem(item)
             self.node_items[node["node_id"]] = item
 
+        parallel_offsets = relation_parallel_offsets(relations)
         for relation in relations:
             source_item = self.node_items.get(relation["source_id"])
             target_item = self.node_items.get(relation["target_id"])
             if not source_item or not target_item:
                 continue
-            self._add_edge(source_item, target_item, relation)
+            self._add_edge(
+                source_item,
+                target_item,
+                relation,
+                parallel_offset=parallel_offsets.get(int(relation.get("relation_id") or 0), 0.0),
+            )
 
         if nodes:
             self.position_node_labels()
@@ -478,8 +484,15 @@ class GraphViewer(QGraphicsView):
     def _emit_selected_nodes_changed(self) -> None:
         self.selectedNodesChanged.emit(self.selected_node_ids())
 
-    def _add_edge(self, source_item: "NodeItem", target_item: "NodeItem", relation: dict[str, Any]) -> None:
-        edge_item = EdgeItem(source_item, target_item, relation)
+    def _add_edge(
+        self,
+        source_item: "NodeItem",
+        target_item: "NodeItem",
+        relation: dict[str, Any],
+        *,
+        parallel_offset: float = 0.0,
+    ) -> None:
+        edge_item = EdgeItem(source_item, target_item, relation, parallel_offset=parallel_offset)
         self.scene.addItem(edge_item)
         self.scene.addItem(edge_item.label_item)
         if edge_item.arrow_item is not None:
@@ -700,11 +713,19 @@ class NodeItem(QGraphicsEllipseItem):
 
 
 class EdgeItem(QGraphicsLineItem):
-    def __init__(self, source_item: NodeItem, target_item: NodeItem, relation: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        source_item: NodeItem,
+        target_item: NodeItem,
+        relation: dict[str, Any],
+        *,
+        parallel_offset: float = 0.0,
+    ) -> None:
         super().__init__()
         self.source_item = source_item
         self.target_item = target_item
         self.relation = relation
+        self.parallel_offset = float(parallel_offset)
         self.color = QColor(relation.get("relation_type_color") or "#64748B")
         self.setPen(QPen(self.color, edge_width(relation)))
         self.setAcceptHoverEvents(True)
@@ -733,6 +754,14 @@ class EdgeItem(QGraphicsLineItem):
     def update_position(self) -> None:
         source_point = self.source_item.scenePos()
         target_point = self.target_item.scenePos()
+        dx = target_point.x() - source_point.x()
+        dy = target_point.y() - source_point.y()
+        distance = math.hypot(dx, dy)
+        if distance > 1e-6 and self.parallel_offset:
+            offset_x = -dy / distance * self.parallel_offset
+            offset_y = dx / distance * self.parallel_offset
+            source_point += QPointF(offset_x, offset_y)
+            target_point += QPointF(offset_x, offset_y)
         self.setLine(source_point.x(), source_point.y(), target_point.x(), target_point.y())
 
         midpoint = QPointF(
@@ -766,6 +795,23 @@ class EdgeItem(QGraphicsLineItem):
         stroker = QPainterPathStroker()
         stroker.setWidth(max(12.0, edge_width(self.relation) + 8.0))
         return stroker.createStroke(path)
+
+
+def relation_parallel_offsets(relations: list[dict[str, Any]], *, spacing: float = 16.0) -> dict[int, float]:
+    grouped: dict[tuple[int, int], list[dict[str, Any]]] = {}
+    for relation in relations:
+        source_id = int(relation["source_id"])
+        target_id = int(relation["target_id"])
+        grouped.setdefault(tuple(sorted((source_id, target_id))), []).append(relation)
+
+    offsets: dict[int, float] = {}
+    for grouped_relations in grouped.values():
+        ordered = sorted(grouped_relations, key=lambda relation: int(relation.get("relation_id") or 0))
+        midpoint = (len(ordered) - 1) / 2.0
+        for index, relation in enumerate(ordered):
+            relation_id = int(relation.get("relation_id") or 0)
+            offsets[relation_id] = (index - midpoint) * spacing
+    return offsets
 
 
 def node_color(node: dict[str, Any]) -> QColor:

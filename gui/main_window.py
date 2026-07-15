@@ -4,6 +4,7 @@ import os
 import csv
 from datetime import datetime
 import json
+import math
 import random
 import shutil
 import sqlite3
@@ -149,12 +150,14 @@ class MainWindow(QMainWindow):
         super().__init__(parent)
         self.setWindowTitle("FileGraph")
         self.resize(1280, 820)
+        self.setMinimumWidth(940)
 
         self.database = DatabaseManager(db_path)
         self.database.init_db()
         self.graph_manager = GraphManager(self.database)
         self.selected_node: dict[str, Any] | None = None
         self.collapsed_folder_node_ids: set[int] = set()
+        self.collapsed_folder_child_offsets: dict[int, dict[int, tuple[float, float]]] = {}
         self.current_graph_data: dict[str, list[dict[str, Any]]] = {"nodes": [], "relations": []}
         self.graph_font_size = self._load_graph_font_size()
         self.node_label_mode = self._load_node_label_mode()
@@ -336,13 +339,16 @@ class MainWindow(QMainWindow):
         return random.randint(1, MAX_LAYOUT_SEED)  # nosec B311
 
     def _build_layout(self) -> None:
-        splitter = QSplitter(Qt.Horizontal)
-        splitter.addWidget(self.graph_viewer)
-        splitter.addWidget(self.control_panel)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 0)
+        self.main_splitter = QSplitter(Qt.Horizontal)
+        self.main_splitter.addWidget(self.graph_viewer)
+        self.main_splitter.addWidget(self.control_panel)
+        self.main_splitter.setStretchFactor(0, 1)
+        self.main_splitter.setStretchFactor(1, 0)
+        self.main_splitter.setCollapsible(1, False)
+        self.main_splitter.setSizes([880, 400])
+        self.main_splitter.handle(1).setEnabled(False)
 
-        self.setCentralWidget(splitter)
+        self.setCentralWidget(self.main_splitter)
 
     def _connect_signals(self) -> None:
         self.graph_viewer.nodeSelected.connect(self.on_node_selected)
@@ -758,6 +764,7 @@ class MainWindow(QMainWindow):
         self.graph_manager = GraphManager(self.database)
         self.selected_node = None
         self.collapsed_folder_node_ids.clear()
+        self.collapsed_folder_child_offsets.clear()
         self.reload_runtime_settings()
         self.reload_graph()
         return backup_path
@@ -1792,21 +1799,73 @@ class MainWindow(QMainWindow):
         return contained_ids
 
     def toggle_folder_contents(self, folder_node_id: int) -> None:
-        contained_file_count = len(self.contained_file_node_ids(folder_node_id))
+        contained_file_ids = self.contained_file_node_ids(folder_node_id)
+        contained_file_count = len(contained_file_ids)
         if contained_file_count == 0:
             self.statusBar().showMessage("접거나 펼칠 내부 파일이 없습니다.", 2000)
             return
 
         if folder_node_id in self.collapsed_folder_node_ids:
+            self.reposition_expanded_folder_files(folder_node_id, contained_file_ids)
             self.collapsed_folder_node_ids.remove(folder_node_id)
+            self.collapsed_folder_child_offsets.pop(folder_node_id, None)
             action_label = "펼쳤습니다"
         else:
+            self.collapsed_folder_child_offsets[folder_node_id] = self.capture_folder_child_offsets(
+                folder_node_id,
+                contained_file_ids,
+            )
             self.collapsed_folder_node_ids.add(folder_node_id)
             action_label = "접었습니다"
 
         self.reload_graph()
         self.graph_viewer.focus_node(folder_node_id)
         self.statusBar().showMessage(f"내부 파일 {contained_file_count}개를 {action_label}.", 2500)
+
+    def capture_folder_child_offsets(
+        self,
+        folder_node_id: int,
+        child_node_ids: set[int],
+    ) -> dict[int, tuple[float, float]]:
+        positions = {
+            int(node["node_id"]): (float(node.get("x", 0.0)), float(node.get("y", 0.0)))
+            for node in self.current_graph_data.get("nodes", [])
+        }
+        folder_position = positions.get(folder_node_id)
+        if folder_position is None and folder_node_id in self.graph_viewer.node_items:
+            point = self.graph_viewer.node_items[folder_node_id].scenePos()
+            folder_position = (point.x(), point.y())
+        folder_x, folder_y = folder_position or (0.0, 0.0)
+        offsets = {}
+        for index, child_id in enumerate(sorted(child_node_ids)):
+            child_position = positions.get(child_id)
+            if child_position is None:
+                angle = (2.0 * math.pi * index) / max(1, len(child_node_ids))
+                child_position = (folder_x + math.cos(angle) * 160.0, folder_y + math.sin(angle) * 160.0)
+            offsets[child_id] = (child_position[0] - folder_x, child_position[1] - folder_y)
+        return offsets
+
+    def reposition_expanded_folder_files(
+        self,
+        folder_node_id: int,
+        child_node_ids: set[int],
+    ) -> None:
+        item = self.graph_viewer.node_items.get(folder_node_id)
+        if item is not None:
+            folder_x, folder_y = item.scenePos().x(), item.scenePos().y()
+        else:
+            folder = self.database.get_node(folder_node_id) or {}
+            folder_x = float(folder.get("layout_x") or 0.0)
+            folder_y = float(folder.get("layout_y") or 0.0)
+        saved_offsets = self.collapsed_folder_child_offsets.get(folder_node_id, {})
+        positions = {}
+        for index, child_id in enumerate(sorted(child_node_ids)):
+            offset = saved_offsets.get(child_id)
+            if offset is None:
+                angle = (2.0 * math.pi * index) / max(1, len(child_node_ids))
+                offset = (math.cos(angle) * 160.0, math.sin(angle) * 160.0)
+            positions[child_id] = (folder_x + offset[0], folder_y + offset[1])
+        self.database.update_node_layouts(positions)
 
     def edit_node_note(self, node_id: int) -> None:
         node = self.database.get_node(node_id)

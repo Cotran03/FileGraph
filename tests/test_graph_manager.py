@@ -9,7 +9,9 @@ from core.graph_manager import (
     GraphManager,
     default_layout_scale,
     layout_spring_distance,
+    layout_quality_score,
     resolve_layout_overlaps,
+    resolve_layout_edge_node_overlaps,
     relation_strength_weight,
 )
 
@@ -159,3 +161,31 @@ def test_downstream_impact_follows_dependency_semantics(database):
 
     assert impacted == {data_id, script_id, result_id, pdf_id}
     assert unrelated_id not in impacted
+
+
+def test_edge_node_overlap_resolution_pushes_unconnected_node_off_edge():
+    nodes = [
+        {"node_id": 1, "node_type": "FILE"},
+        {"node_id": 2, "node_type": "FILE"},
+        {"node_id": 3, "node_type": "FILE"},
+    ]
+    relations = [{"source_id": 1, "target_id": 2}]
+    layout = {1: (-200.0, 0.0), 2: (200.0, 0.0), 3: (0.0, 0.0)}
+
+    resolved = resolve_layout_edge_node_overlaps(layout, nodes, relations)
+
+    assert abs(resolved[3][1]) >= 28.0 + 22.0 - 1e-6
+
+
+def test_layout_quality_prefers_non_crossing_edges():
+    nodes = [{"node_id": node_id, "node_type": "FILE"} for node_id in range(1, 5)]
+    relations = [
+        {"source_id": 1, "target_id": 2},
+        {"source_id": 3, "target_id": 4},
+    ]
+    crossing = {1: (-100.0, -100.0), 2: (100.0, 100.0), 3: (-100.0, 100.0), 4: (100.0, -100.0)}
+    separated = {1: (-100.0, -100.0), 2: (100.0, -100.0), 3: (-100.0, 100.0), 4: (100.0, 100.0)}
+
+    assert layout_quality_score(separated, nodes, relations) < layout_quality_score(
+        crossing, nodes, relations
+    )

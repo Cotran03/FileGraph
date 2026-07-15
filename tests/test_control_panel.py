@@ -212,11 +212,11 @@ def test_detail_sections_use_compact_tabs(app):
     assert panel.detail_tabs.tabText(2) == "후보 (1)"
 
 
-def test_control_panel_is_wide_enough_for_right_side_controls(app):
+def test_control_panel_width_is_fixed_for_right_side_controls(app):
     panel = ControlPanel()
 
-    assert panel.minimumWidth() >= 380
-    assert panel.maximumWidth() >= 500
+    assert panel.minimumWidth() == 400
+    assert panel.maximumWidth() == 400
 
 
 def test_control_panel_does_not_keep_embedded_settings_controls(app):

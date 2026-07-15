@@ -74,8 +74,7 @@ class ControlPanel(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("sidePanel")
-        self.setMinimumWidth(380)
-        self.setMaximumWidth(520)
+        self.setFixedWidth(400)
         self._current_node_id: int | None = None
         self._selected_node_count = 0
 
