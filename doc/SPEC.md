@@ -11,7 +11,7 @@
 
 ## 관련 문서
 
-- [README.md](./README.md): 제품 소개, 핵심 아이디어, 현재 상태
+- [README.md](../README.md): 제품 소개, 핵심 아이디어, 현재 상태
 - [USAGE.md](./USAGE.md): 실행 방법과 사용 흐름
 - [RELEASE_CHECKLIST.md](./RELEASE_CHECKLIST.md): AI 없는 첫 릴리즈 후보 검증 기준
 - [requirements.txt](./requirements.txt): Python 의존성 목록
@@ -29,6 +29,7 @@
 - `main.py`: 런타임 경로 준비, 단일 프로세스 잠금, DB 초기화, PySide6 앱 실행
 - `core/database_manager.py`: SQLite 스키마, relation type seed, 노드/관계 CRUD, 검색, 설정, 좌표/상태/해시 저장
 - `core/graph_manager.py`: NetworkX 그래프 생성, 관계 강도 weight 변환, 레이아웃 계산, 포커스 노드 추출
+- `core/relationship_detection.py`: 설명 가능한 관계 탐지기와 Python 로컬 파일 읽기·쓰기 후보 생성
 - `core/file_integrity.py`: 파일 상태 검사, SHA-256 해시 계산, 누락 파일 해시 기반 재탐색, 진행률/취소 콜백
 - `gui/main_window.py`: 메인 윈도우, 검색/검색 제안, 보기 프리셋, 그래프/제어 패널 연결, 설정 저장, 파일 위치 갱신, 누락 찾기, 폴더 내부 파일 접기/펼치기, 단축키, 백업/가져오기/내보내기
 - `gui/graph_viewer.py`: 그래프 렌더링, 확장자/상태별 SVG 아이콘 표시, 사용자 지정 아이콘 매핑, 드래그, 선택, 라벨 표시 모드, 컨텍스트 메뉴, 드롭 처리
@@ -128,7 +129,7 @@ FileGraph는 파일 시스템의 물리적 위치와 별개로 파일/폴더 사
 
 ## 2. 단계별 범위
 
-### Phase 1: 수동 그래프 MVP
+### Phase 1: 수동 그래프 기반
 
 현재 MVP 범위는 구현 완료 상태입니다.
 
@@ -279,6 +280,8 @@ relation strength:
   CONTAINS       -> 포함
   VERSION_OF     -> 다른 버전
   SAME_FILE      -> 같은 파일
+  READS          -> 읽음
+  WRITES         -> 생성/기록
 
 relation direction:
   is_directional = 1  방향 있음
@@ -359,7 +362,9 @@ INSERT OR IGNORE INTO relation_types (
     (3, 'GENERATED_FROM', '원본에서 생성됨', '출발 노드가 도착 노드에서 생성됨', '#7C3AED', 1, 1),
     (4, 'CONTAINS', '포함', '출발 노드가 도착 노드를 포함함', '#059669', 1, 1),
     (5, 'VERSION_OF', '다른 버전', '두 노드가 서로 다른 버전임', '#D97706', 0, 1),
-    (6, 'SAME_FILE', '같은 파일', '서로 다른 경로가 동일한 실제 파일을 가리킴', '#0891B2', 0, 1);
+    (6, 'SAME_FILE', '같은 파일', '서로 다른 경로가 동일한 실제 파일을 가리킴', '#0891B2', 0, 1),
+    (7, 'READS', '읽음', '출발 파일이 도착 파일을 입력으로 읽음', '#2563EB', 1, 1),
+    (8, 'WRITES', '생성/기록', '출발 파일이 도착 파일을 생성하거나 기록함', '#DC2626', 1, 1);
 
 CREATE TABLE IF NOT EXISTS relations (
     relation_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -371,6 +376,9 @@ CREATE TABLE IF NOT EXISTS relations (
     strength TEXT NOT NULL DEFAULT 'MEDIUM'
         CHECK (strength IN ('HIGH', 'MEDIUM', 'LOW')),
     description TEXT,
+    source TEXT NOT NULL DEFAULT 'MANUAL',
+    confidence REAL,
+    evidence TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (relation_type_id) REFERENCES relation_types(relation_type_id),
@@ -383,6 +391,21 @@ CREATE INDEX IF NOT EXISTS idx_relations_source ON relations(source_id);
 CREATE INDEX IF NOT EXISTS idx_relations_target ON relations(target_id);
 CREATE INDEX IF NOT EXISTS idx_relations_type ON relations(relation_type_id);
 CREATE INDEX IF NOT EXISTS idx_relations_direction ON relations(is_directional);
+
+CREATE TABLE IF NOT EXISTS relationship_candidates (
+    candidate_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_node_id INTEGER NOT NULL,
+    target_node_id INTEGER NOT NULL,
+    suggested_relation_type_code TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    detector TEXT NOT NULL,
+    evidence TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'PENDING',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (source_node_id) REFERENCES nodes(node_id) ON DELETE CASCADE,
+    FOREIGN KEY (target_node_id) REFERENCES nodes(node_id) ON DELETE CASCADE
+);
 
 CREATE TABLE IF NOT EXISTS drive_map (
     old_file_id TEXT NOT NULL,
@@ -819,6 +842,9 @@ MVP에서는 watchdog 기반 실시간 감시를 넣지 않습니다.
 
 최근 반영한 변경 메모:
 
+- 제품 중심을 수동 그래프 작성에서 로컬 파일 관계·출처·의존성 추적으로 확장했다. 관계에 생성 출처, 신뢰도와 근거를 저장하고 실제 관계와 분리된 후보 승인·거절 흐름을 추가했다.
+- 첫 설명 가능 탐지기로 Python 로컬 파일 참조 분석을 추가했다. 명시적인 읽기·쓰기 호출만 `READS`, `WRITES` 후보로 만들며 자동 확정하지 않는다.
+- 오른쪽 패널을 파일 중심 맥락과 관계 후보 검토가 가능하도록 확장했다.
 - `QLockFile` 기반 단일 인스턴스 잠금을 추가해 FileGraph 프로세스가 한 번에 하나만 실행되도록 했다.
 - 서로 다른 경로가 동일한 실제 파일을 가리키는 하드 링크를 별도 노드로 허용하고 `같은 파일(SAME_FILE)` 관계를 자동 생성하도록 DB 제약과 마이그레이션을 변경했다.
 - 작업 패널과 별도 설정 화면을 분리했다. 설정 화면에서 그래프 표시, 노드 색상, 강조 색상, 확장자 아이콘 매핑, 무시 폴더 설정을 관리한다.

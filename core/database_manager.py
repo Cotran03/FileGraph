@@ -68,7 +68,9 @@ INSERT OR IGNORE INTO relation_types (
     (3, 'GENERATED_FROM', '원본에서 생성됨', '출발 노드가 도착 노드에서 생성됨', '#7C3AED', 1, 1),
     (4, 'CONTAINS', '포함', '출발 노드가 도착 노드를 포함함', '#059669', 1, 1),
     (5, 'VERSION_OF', '다른 버전', '두 노드가 서로 다른 버전임', '#D97706', 0, 1),
-    (6, 'SAME_FILE', '같은 파일', '서로 다른 경로가 동일한 실제 파일을 가리킴', '#0891B2', 0, 1);
+    (6, 'SAME_FILE', '같은 파일', '서로 다른 경로가 동일한 실제 파일을 가리킴', '#0891B2', 0, 1),
+    (7, 'READS', '읽음', '출발 파일이 도착 파일을 입력으로 읽음', '#2563EB', 1, 1),
+    (8, 'WRITES', '생성/기록', '출발 파일이 도착 파일을 생성하거나 기록함', '#DC2626', 1, 1);
 
 CREATE TABLE IF NOT EXISTS relations (
     relation_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -80,6 +82,10 @@ CREATE TABLE IF NOT EXISTS relations (
     strength TEXT NOT NULL DEFAULT 'MEDIUM'
         CHECK (strength IN ('HIGH', 'MEDIUM', 'LOW')),
     description TEXT,
+    source TEXT NOT NULL DEFAULT 'MANUAL'
+        CHECK (source IN ('MANUAL', 'DETECTED', 'CONFIRMED', 'SYSTEM')),
+    confidence REAL CHECK (confidence IS NULL OR (confidence >= 0.0 AND confidence <= 1.0)),
+    evidence TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (relation_type_id) REFERENCES relation_types(relation_type_id),
@@ -92,6 +98,27 @@ CREATE INDEX IF NOT EXISTS idx_relations_source ON relations(source_id);
 CREATE INDEX IF NOT EXISTS idx_relations_target ON relations(target_id);
 CREATE INDEX IF NOT EXISTS idx_relations_type ON relations(relation_type_id);
 CREATE INDEX IF NOT EXISTS idx_relations_direction ON relations(is_directional);
+
+CREATE TABLE IF NOT EXISTS relationship_candidates (
+    candidate_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_node_id INTEGER NOT NULL,
+    target_node_id INTEGER NOT NULL,
+    suggested_relation_type_code TEXT NOT NULL,
+    confidence REAL NOT NULL CHECK (confidence >= 0.0 AND confidence <= 1.0),
+    detector TEXT NOT NULL,
+    evidence TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'PENDING'
+        CHECK (status IN ('PENDING', 'APPROVED', 'REJECTED')),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (source_node_id) REFERENCES nodes(node_id) ON DELETE CASCADE,
+    FOREIGN KEY (target_node_id) REFERENCES nodes(node_id) ON DELETE CASCADE,
+    UNIQUE (source_node_id, target_node_id, suggested_relation_type_code, detector, evidence)
+);
+
+CREATE INDEX IF NOT EXISTS idx_candidates_status ON relationship_candidates(status);
+CREATE INDEX IF NOT EXISTS idx_candidates_source ON relationship_candidates(source_node_id);
+CREATE INDEX IF NOT EXISTS idx_candidates_target ON relationship_candidates(target_node_id);
 
 CREATE TABLE IF NOT EXISTS drive_map (
     old_file_id TEXT NOT NULL,
@@ -457,6 +484,9 @@ class DatabaseManager:
         is_directional: bool | None = None,
         strength: str = "MEDIUM",
         description: str | None = None,
+        source: str = "MANUAL",
+        confidence: float | None = None,
+        evidence: str | None = None,
     ) -> int:
         if source_id == target_id:
             raise ValueError("source_id and target_id must be different.")
@@ -485,8 +515,8 @@ class DatabaseManager:
                 target_id,
                 is_directional,
                 strength,
-                description
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                description, source, confidence, evidence
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 relation_type["relation_type_id"],
@@ -495,10 +525,102 @@ class DatabaseManager:
                 int(resolved_is_directional),
                 strength,
                 description,
+                source.upper(),
+                confidence,
+                evidence,
             ),
         )
         self.conn.commit()
         return int(cursor.lastrowid)
+
+    def add_relationship_candidate(
+        self,
+        source_node_id: int,
+        target_node_id: int,
+        suggested_relation_type_code: str,
+        *,
+        confidence: float,
+        detector: str,
+        evidence: str,
+    ) -> int | None:
+        cursor = self.conn.execute(
+            """
+            INSERT OR IGNORE INTO relationship_candidates (
+                source_node_id, target_node_id, suggested_relation_type_code,
+                confidence, detector, evidence
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                source_node_id,
+                target_node_id,
+                suggested_relation_type_code.upper(),
+                confidence,
+                detector,
+                evidence,
+            ),
+        )
+        self.conn.commit()
+        return int(cursor.lastrowid) if cursor.rowcount else None
+
+    def list_relationship_candidates(
+        self,
+        *,
+        status: str | None = "PENDING",
+        node_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        conditions = []
+        params: list[Any] = []
+        if status is not None:
+            conditions.append("c.status = ?")
+            params.append(status.upper())
+        if node_id is not None:
+            conditions.append("(c.source_node_id = ? OR c.target_node_id = ?)")
+            params.extend((node_id, node_id))
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        rows = self.conn.execute(
+            f"""
+            SELECT c.*, s.name AS source_name, s.path AS source_path,
+                   t.name AS target_name, t.path AS target_path,
+                   rt.name AS suggested_relation_type_name
+            FROM relationship_candidates c
+            JOIN nodes s ON s.node_id = c.source_node_id
+            JOIN nodes t ON t.node_id = c.target_node_id
+            LEFT JOIN relation_types rt ON rt.code = c.suggested_relation_type_code
+            {where}
+            ORDER BY c.confidence DESC, c.candidate_id
+            """,
+            tuple(params),
+        ).fetchall()
+        return rows_to_dicts(rows)
+
+    def approve_relationship_candidate(self, candidate_id: int) -> int:
+        candidate = self.conn.execute(
+            "SELECT * FROM relationship_candidates WHERE candidate_id = ?",
+            (candidate_id,),
+        ).fetchone()
+        if candidate is None:
+            raise ValueError("Unknown relationship candidate.")
+        relation_id = self.add_relation(
+            int(candidate["source_node_id"]),
+            int(candidate["target_node_id"]),
+            relation_type_code=str(candidate["suggested_relation_type_code"]),
+            source="CONFIRMED",
+            confidence=float(candidate["confidence"]),
+            evidence=str(candidate["evidence"]),
+        )
+        self.conn.execute(
+            "UPDATE relationship_candidates SET status = 'APPROVED', updated_at = CURRENT_TIMESTAMP WHERE candidate_id = ?",
+            (candidate_id,),
+        )
+        self.conn.commit()
+        return relation_id
+
+    def reject_relationship_candidate(self, candidate_id: int) -> None:
+        self.conn.execute(
+            "UPDATE relationship_candidates SET status = 'REJECTED', updated_at = CURRENT_TIMESTAMP WHERE candidate_id = ?",
+            (candidate_id,),
+        )
+        self.conn.commit()
 
     def find_duplicate_relation(
         self,
@@ -746,6 +868,17 @@ class DatabaseManager:
             if column_name not in existing_columns:
                 self.conn.execute(column_sql)
 
+        relation_columns = {
+            row["name"] for row in self.conn.execute("PRAGMA table_info(relations)").fetchall()
+        }
+        for column_name, column_sql in (
+            ("source", "ALTER TABLE relations ADD COLUMN source TEXT NOT NULL DEFAULT 'MANUAL'"),
+            ("confidence", "ALTER TABLE relations ADD COLUMN confidence REAL"),
+            ("evidence", "ALTER TABLE relations ADD COLUMN evidence TEXT"),
+        ):
+            if column_name not in relation_columns:
+                self.conn.execute(column_sql)
+
         self._remove_file_identity_unique_constraint()
         self.conn.execute(
             """
@@ -758,6 +891,18 @@ class DatabaseManager:
             )
             """
         )
+        for code, name, description, color in (
+            ("READS", "읽음", "출발 파일이 도착 파일을 입력으로 읽음", "#2563EB"),
+            ("WRITES", "생성/기록", "출발 파일이 도착 파일을 생성하거나 기록함", "#DC2626"),
+        ):
+            self.conn.execute(
+                """
+                INSERT OR IGNORE INTO relation_types (
+                    code, name, description, color, default_is_directional, is_system
+                ) VALUES (?, ?, ?, ?, 1, 1)
+                """,
+                (code, name, description, color),
+            )
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_nodes_file_identity ON nodes(file_id, volume_serial)"
         )
@@ -855,8 +1000,8 @@ class DatabaseManager:
                 """
                 INSERT INTO relations (
                     relation_type_id, source_id, target_id,
-                    is_directional, strength, description
-                ) VALUES (?, ?, ?, 0, 'HIGH', ?)
+                    is_directional, strength, description, source
+                ) VALUES (?, ?, ?, 0, 'HIGH', ?, 'SYSTEM')
                 """,
                 (
                     relation_type_id,

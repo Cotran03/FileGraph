@@ -65,6 +65,9 @@ class ControlPanel(QWidget):
     viewPresetRequested = Signal(str)
     editRelationRequested = Signal(int)
     deleteRelationRequested = Signal(int)
+    analyzeRelationshipsRequested = Signal()
+    approveCandidateRequested = Signal(int)
+    rejectCandidateRequested = Signal(int)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -155,6 +158,7 @@ class ControlPanel(QWidget):
         self.export_csv_button = QPushButton("CSV 내보내기")
         self.relation_button = QPushButton("관계 추가")
         self.reset_button = QPushButton("자동 정렬")
+        self.analyze_relationships_button = QPushButton("관계 후보 분석")
         set_button_variant(self.relation_button, "primary")
         for button in (
             self.refresh_button,
@@ -164,26 +168,28 @@ class ControlPanel(QWidget):
             self.export_json_button,
             self.export_csv_button,
             self.reset_button,
+            self.analyze_relationships_button,
         ):
             set_button_variant(button, "secondary")
         self.check_files_button.setToolTip(
             "등록한 파일/폴더의 현재 위치와 접근 가능 여부를 다시 확인하고 상태를 갱신합니다."
         )
         actions.addWidget(self.relation_button, 0, 0, 1, 2)
-        actions.addWidget(self.refresh_button, 1, 0)
-        actions.addWidget(self.check_files_button, 1, 1)
-        actions.addWidget(self.reset_button, 2, 0, 1, 2)
-        actions.addWidget(self.locate_missing_button, 3, 0, 1, 2)
-        actions.addWidget(self.import_db_button, 4, 0, 1, 2)
-        actions.addWidget(self.export_json_button, 5, 0)
-        actions.addWidget(self.export_csv_button, 5, 1)
+        actions.addWidget(self.analyze_relationships_button, 1, 0, 1, 2)
+        actions.addWidget(self.refresh_button, 2, 0)
+        actions.addWidget(self.check_files_button, 2, 1)
+        actions.addWidget(self.reset_button, 3, 0, 1, 2)
+        actions.addWidget(self.locate_missing_button, 4, 0, 1, 2)
+        actions.addWidget(self.import_db_button, 5, 0, 1, 2)
+        actions.addWidget(self.export_json_button, 6, 0)
+        actions.addWidget(self.export_csv_button, 6, 1)
         action_root.addLayout(actions)
 
         self.selection_summary = QLabel("선택 노드 0개")
         self.selection_summary.setObjectName("metaText")
         action_root.addWidget(self.selection_summary)
 
-        self.node_section = Section("선택 노드")
+        self.node_section = Section("파일 맥락")
         self.node_name = QLabel("선택된 노드가 없습니다.")
         self.node_name.setObjectName("nodeName")
         self.node_path = QLabel("")
@@ -195,6 +201,10 @@ class ControlPanel(QWidget):
         self.node_section.body.addWidget(self.node_name)
         self.node_section.body.addWidget(self.node_path)
         self.node_section.body.addWidget(self.node_meta)
+        self.node_context = QLabel("")
+        self.node_context.setObjectName("metaText")
+        self.node_context.setWordWrap(True)
+        self.node_section.body.addWidget(self.node_context)
         self.node_section.body.addWidget(Separator())
         focus_actions = QHBoxLayout()
         focus_actions.setSpacing(8)
@@ -233,6 +243,20 @@ class ControlPanel(QWidget):
         self.relation_section.body.addLayout(relation_actions)
         action_root.addWidget(self.relation_section, 1)
 
+        self.candidate_section = Section("감지된 관계 후보")
+        self.candidate_list = QListWidget()
+        self.candidate_list.setMinimumHeight(150)
+        self.candidate_section.body.addWidget(self.candidate_list)
+        candidate_actions = QHBoxLayout()
+        self.approve_candidate_button = QPushButton("승인")
+        self.reject_candidate_button = QPushButton("거절")
+        set_button_variant(self.approve_candidate_button, "primary")
+        set_button_variant(self.reject_candidate_button, "danger")
+        candidate_actions.addWidget(self.approve_candidate_button)
+        candidate_actions.addWidget(self.reject_candidate_button)
+        self.candidate_section.body.addLayout(candidate_actions)
+        action_root.addWidget(self.candidate_section)
+
         self.summary = QLabel("노드 0개 / 관계 0개")
         self.summary.setObjectName("summary")
         root.addWidget(self.summary)
@@ -252,6 +276,7 @@ class ControlPanel(QWidget):
         self.export_json_button.clicked.connect(self.exportJsonRequested.emit)
         self.export_csv_button.clicked.connect(self.exportCsvRequested.emit)
         self.relation_button.clicked.connect(self.addRelationRequested.emit)
+        self.analyze_relationships_button.clicked.connect(self.analyzeRelationshipsRequested.emit)
         self.reset_button.clicked.connect(self.resetLayoutRequested.emit)
         self.delete_node_button.clicked.connect(self._emit_delete_node)
         self.focus_depth_input.valueChanged.connect(self._emit_focus_depth)
@@ -262,8 +287,12 @@ class ControlPanel(QWidget):
         self.delete_relation_button.clicked.connect(self._emit_delete_relation)
         self.relation_list.itemDoubleClicked.connect(lambda _item: self._emit_edit_relation())
         self.relation_list.itemSelectionChanged.connect(self._sync_relation_buttons)
+        self.approve_candidate_button.clicked.connect(self._emit_approve_candidate)
+        self.reject_candidate_button.clicked.connect(self._emit_reject_candidate)
+        self.candidate_list.itemSelectionChanged.connect(self._sync_candidate_buttons)
         self._sync_node_buttons()
         self._sync_relation_buttons()
+        self._sync_candidate_buttons()
 
     def set_summary(self, node_count: int, relation_count: int) -> None:
         self.summary.setText(f"노드 {node_count}개 / 관계 {relation_count}개")
@@ -288,6 +317,7 @@ class ControlPanel(QWidget):
             self.node_name.setText("선택된 노드가 없습니다.")
             self.node_path.setText("")
             self.node_meta.setText("")
+            self.node_context.setText("")
             self._sync_node_buttons()
             return
 
@@ -296,6 +326,59 @@ class ControlPanel(QWidget):
         self.node_path.setText(node.get("path", ""))
         self.node_meta.setText(node_detail_text(node))
         self._sync_node_buttons()
+
+    def show_file_context(self, relations: list[dict[str, Any]], node_id: int | None) -> None:
+        if node_id is None:
+            self.node_context.setText("")
+            return
+        origins = []
+        dependencies = []
+        used_by = []
+        related = []
+        for relation in relations:
+            source_id = int(relation["source_id"])
+            target_id = int(relation["target_id"])
+            relation_name = str(relation.get("relation_type_name") or "")
+            relation_code = relation.get("relation_type_code")
+            if target_id == node_id and relation_code == "WRITES":
+                origins.append(str(relation.get("source_name") or ""))
+            elif source_id == node_id and relation_code == "GENERATED_FROM":
+                origins.append(str(relation.get("target_name") or ""))
+            elif source_id == node_id and relation_code == "READS":
+                dependencies.append(str(relation.get("target_name") or ""))
+            elif target_id == node_id and relation_code == "READS":
+                used_by.append(str(relation.get("source_name") or ""))
+            elif source_id == node_id and relation_code == "USED_BY":
+                used_by.append(str(relation.get("target_name") or ""))
+            else:
+                other = relation.get("target_name") if source_id == node_id else relation.get("source_name")
+                related.append(f"{other} ({relation_name})")
+        lines = [
+            f"출처: {', '.join(origins) if origins else '-'}",
+            f"의존 파일: {', '.join(dependencies) if dependencies else '-'}",
+            f"이 파일을 사용하는 파일: {', '.join(used_by) if used_by else '-'}",
+            f"기타 관계: {', '.join(related) if related else '-'}",
+        ]
+        self.node_context.setText("\n".join(lines))
+
+    def show_candidates(self, candidates: list[dict[str, Any]]) -> None:
+        self.candidate_list.clear()
+        if not candidates:
+            item = QListWidgetItem("검토할 관계 후보가 없습니다.")
+            item.setFlags(Qt.NoItemFlags)
+            self.candidate_list.addItem(item)
+        for candidate in candidates:
+            confidence = round(float(candidate.get("confidence") or 0) * 100)
+            item = QListWidgetItem(
+                f"{candidate.get('source_name')} → {candidate.get('target_name')}\n"
+                f"{candidate.get('suggested_relation_type_name') or candidate.get('suggested_relation_type_code')} · {confidence}%\n"
+                f"{candidate.get('evidence')}"
+            )
+            item.setData(Qt.UserRole, int(candidate["candidate_id"]))
+            self.candidate_list.addItem(item)
+        if candidates:
+            self.candidate_list.setCurrentRow(0)
+        self._sync_candidate_buttons()
 
     def show_relations(self, relations: list[dict[str, Any]]) -> None:
         self.relation_list.clear()
@@ -358,6 +441,21 @@ class ControlPanel(QWidget):
         if node_id is not None:
             self.deleteNodeRequested.emit(node_id)
 
+    def _selected_candidate_id(self) -> int | None:
+        item = self.candidate_list.currentItem()
+        value = item.data(Qt.UserRole) if item is not None else None
+        return int(value) if value is not None else None
+
+    def _emit_approve_candidate(self) -> None:
+        candidate_id = self._selected_candidate_id()
+        if candidate_id is not None:
+            self.approveCandidateRequested.emit(candidate_id)
+
+    def _emit_reject_candidate(self) -> None:
+        candidate_id = self._selected_candidate_id()
+        if candidate_id is not None:
+            self.rejectCandidateRequested.emit(candidate_id)
+
     def _emit_focus_depth(self, depth: int) -> None:
         if self.selected_node_id() is not None:
             self.focusDepthRequested.emit(depth)
@@ -390,6 +488,11 @@ class ControlPanel(QWidget):
             self.relation_action_hint.setText(f"수정/삭제 대상: 관계 #{relation_id}")
         else:
             self.relation_action_hint.setText("관계를 선택하면 수정/삭제 대상이 표시됩니다.")
+
+    def _sync_candidate_buttons(self) -> None:
+        enabled = self._selected_candidate_id() is not None
+        self.approve_candidate_button.setEnabled(enabled)
+        self.reject_candidate_button.setEnabled(enabled)
 
 
 class Section(QFrame):
@@ -480,10 +583,16 @@ def relation_list_label(relation: dict[str, Any]) -> str:
 
 def relation_tooltip(relation: dict[str, Any]) -> str:
     direction_label = "방향 있음" if relation.get("is_directional") else "방향 없음"
-    return (
+    details = (
         f"{relation.get('source_name', '')} -> {relation.get('target_name', '')}\n"
-        f"{relation.get('relation_type_name', '')} / {direction_label} / {relation.get('strength', '')}"
+        f"{relation.get('relation_type_name', '')} / {direction_label} / {relation.get('strength', '')}\n"
+        f"생성 출처: {relation.get('source', 'MANUAL')}"
     )
+    if relation.get("confidence") is not None:
+        details += f" / 신뢰도: {round(float(relation['confidence']) * 100)}%"
+    if relation.get("evidence"):
+        details += f"\n근거: {relation['evidence']}"
+    return details
 
 
 def set_button_variant(button: QPushButton, variant: str) -> None:

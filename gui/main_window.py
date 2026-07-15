@@ -35,6 +35,7 @@ from core.file_integrity import (
     scan_file_statuses as scan_database_file_statuses,
 )
 from core.graph_manager import GraphManager
+from core.relationship_detection import analyze_registered_python_files
 from gui.control_panel import ControlPanel
 from gui.graph_viewer import (
     DEFAULT_LABEL_FONT_SIZE,
@@ -371,6 +372,9 @@ class MainWindow(QMainWindow):
         self.control_panel.editRelationRequested.connect(self.edit_relation)
         self.control_panel.deleteRelationRequested.connect(self.delete_relation)
         self.control_panel.resetLayoutRequested.connect(self.reset_layout)
+        self.control_panel.analyzeRelationshipsRequested.connect(self.analyze_relationship_candidates)
+        self.control_panel.approveCandidateRequested.connect(self.approve_relationship_candidate)
+        self.control_panel.rejectCandidateRequested.connect(self.reject_relationship_candidate)
 
     def _connect_shortcuts(self) -> None:
         self.shortcuts: list[QShortcut] = []
@@ -862,14 +866,48 @@ class MainWindow(QMainWindow):
                 self.control_panel.show_relations(
                     relations_for_node_in_graph_data(data, refreshed["node_id"])
                 )
+                self.control_panel.show_file_context(
+                    relations_for_node_in_graph_data(data, refreshed["node_id"]),
+                    int(refreshed["node_id"]),
+                )
             else:
                 self.selected_node = None
                 self.control_panel.show_node(None)
                 self.control_panel.show_relations(data["relations"])
+                self.control_panel.show_file_context([], None)
         else:
             self.control_panel.show_node(None)
             self.control_panel.show_relations(data["relations"])
+            self.control_panel.show_file_context([], None)
+        self.refresh_candidate_panel()
         self.statusBar().showMessage("그래프를 불러왔습니다.", 2500)
+
+    def refresh_candidate_panel(self) -> None:
+        node_id = int(self.selected_node["node_id"]) if self.selected_node else None
+        candidates = self.database.list_relationship_candidates(node_id=node_id)
+        self.control_panel.show_candidates(candidates)
+
+    def analyze_relationship_candidates(self) -> None:
+        result = analyze_registered_python_files(self.database)
+        self.refresh_candidate_panel()
+        self.statusBar().showMessage(
+            f"관계 후보 분석 완료: 감지 {result['detected']}개, 새 후보 {result['created']}개",
+            4000,
+        )
+
+    def approve_relationship_candidate(self, candidate_id: int) -> None:
+        try:
+            self.database.approve_relationship_candidate(candidate_id)
+        except (ValueError, DuplicateRelationError) as exc:
+            QMessageBox.warning(self, "후보 승인 실패", str(exc))
+            return
+        self.reload_graph()
+        self.statusBar().showMessage("관계 후보를 승인했습니다.", 2500)
+
+    def reject_relationship_candidate(self, candidate_id: int) -> None:
+        self.database.reject_relationship_candidate(candidate_id)
+        self.refresh_candidate_panel()
+        self.statusBar().showMessage("관계 후보를 거절했습니다.", 2500)
 
     def apply_collapsed_folders(self, data: dict[str, list[dict[str, Any]]]) -> dict[str, list[dict[str, Any]]]:
         if not self.collapsed_folder_node_ids:
@@ -1787,9 +1825,10 @@ class MainWindow(QMainWindow):
     def on_node_selected(self, node: dict[str, Any]) -> None:
         self.selected_node = node
         self.control_panel.show_node(node)
-        self.control_panel.show_relations(
-            relations_for_node_in_graph_data(self.current_graph_data, node["node_id"])
-        )
+        relations = relations_for_node_in_graph_data(self.current_graph_data, node["node_id"])
+        self.control_panel.show_relations(relations)
+        self.control_panel.show_file_context(relations, int(node["node_id"]))
+        self.refresh_candidate_panel()
         self.control_panel.set_selected_node_count(len(self.graph_viewer.selected_node_ids()))
 
     def on_selected_nodes_changed(self, node_ids: list[int]) -> None:
@@ -2117,6 +2156,7 @@ def execute_import_plan(
                         target_id,
                         relation_type_code="CONTAINS",
                         strength="HIGH",
+                        source="SYSTEM",
                     )
                 except DuplicateRelationError:
                     pass
@@ -2167,6 +2207,7 @@ def add_default_contains_relations(
                 target_id,
                 relation_type_code="CONTAINS",
                 strength="HIGH",
+                source="SYSTEM",
             )
         except DuplicateRelationError:
             continue
