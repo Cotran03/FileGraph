@@ -884,8 +884,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("그래프를 불러왔습니다.", 2500)
 
     def refresh_candidate_panel(self) -> None:
-        node_id = int(self.selected_node["node_id"]) if self.selected_node else None
-        candidates = self.database.list_relationship_candidates(node_id=node_id)
+        candidates = self.database.list_relationship_candidates()
         self.control_panel.show_candidates(candidates)
 
     def analyze_relationship_candidates(self) -> None:

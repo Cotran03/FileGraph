@@ -89,6 +89,28 @@ def test_search_suggestions_show_matching_nodes(app):
     window.close()
 
 
+def test_candidate_panel_keeps_global_recommendations_when_unrelated_node_is_selected(app):
+    window = MainWindow(":memory:")
+    source_id = window.database.add_node("C:/workspace/analysis.py", node_type="FILE")
+    target_id = window.database.add_node("C:/workspace/data.csv", node_type="FILE")
+    unrelated_id = window.database.add_node("C:/workspace/notes.txt", node_type="FILE")
+    candidate_id = window.database.add_relationship_candidate(
+        source_id,
+        target_id,
+        "READS",
+        confidence=0.95,
+        detector="test",
+        evidence="analysis.py:1",
+    )
+    window.selected_node = window.database.get_node(unrelated_id)
+
+    window.refresh_candidate_panel()
+
+    assert window.control_panel.candidate_list.count() == 1
+    assert window.control_panel.candidate_list.item(0).data(Qt.UserRole) == candidate_id
+    window.close()
+
+
 def test_root_folder_annotation_marks_folders_without_parent(app):
     window = MainWindow(":memory:")
     root_id = window.database.add_node("C:/workspace", node_type="FOLDER")
