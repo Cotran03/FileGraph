@@ -26,7 +26,7 @@
 
 ## 현재 구현 모듈
 
-- `main.py`: 런타임 경로 준비, DB 초기화, PySide6 앱 실행
+- `main.py`: 런타임 경로 준비, 단일 프로세스 잠금, DB 초기화, PySide6 앱 실행
 - `core/database_manager.py`: SQLite 스키마, relation type seed, 노드/관계 CRUD, 검색, 설정, 좌표/상태/해시 저장
 - `core/graph_manager.py`: NetworkX 그래프 생성, 관계 강도 weight 변환, 레이아웃 계산, 포커스 노드 추출
 - `core/file_integrity.py`: 파일 상태 검사, SHA-256 해시 계산, 누락 파일 해시 기반 재탐색, 진행률/취소 콜백
@@ -224,6 +224,8 @@ FileGraph/
 
 PyInstaller 등으로 빌드된 실행 환경에서는 `%LOCALAPPDATA%/FileGraph/`를 사용합니다.
 
+앱 시작 시 런타임 데이터 경로의 `FileGraph.lock`을 `QLockFile`로 잠급니다. 이미 다른 FileGraph 프로세스가 잠금을 보유하고 있으면 새 프로세스는 DB를 열거나 창을 만들지 않고 즉시 종료합니다.
+
 - DB: `%LOCALAPPDATA%/FileGraph/database.db`
 - 설정: `%LOCALAPPDATA%/FileGraph/config/`
 - 로그: `%LOCALAPPDATA%/FileGraph/logs/`
@@ -276,6 +278,7 @@ relation strength:
   GENERATED_FROM -> 원본에서 생성됨
   CONTAINS       -> 포함
   VERSION_OF     -> 다른 버전
+  SAME_FILE      -> 같은 파일
 
 relation direction:
   is_directional = 1  방향 있음
@@ -317,14 +320,14 @@ CREATE TABLE IF NOT EXISTS nodes (
     deleted_at TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE (path),
-    UNIQUE (file_id, volume_serial)
+    UNIQUE (path)
 );
 
 CREATE INDEX IF NOT EXISTS idx_nodes_path ON nodes(path);
 CREATE INDEX IF NOT EXISTS idx_nodes_name ON nodes(name);
 CREATE INDEX IF NOT EXISTS idx_nodes_file_hash ON nodes(file_hash);
 CREATE INDEX IF NOT EXISTS idx_nodes_status ON nodes(status);
+CREATE INDEX IF NOT EXISTS idx_nodes_file_identity ON nodes(file_id, volume_serial);
 
 CREATE TABLE IF NOT EXISTS relation_types (
     relation_type_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -355,7 +358,8 @@ INSERT OR IGNORE INTO relation_types (
     (2, 'REFERENCE', '참고자료', '출발 노드가 도착 노드를 참고함', '#2563EB', 1, 1),
     (3, 'GENERATED_FROM', '원본에서 생성됨', '출발 노드가 도착 노드에서 생성됨', '#7C3AED', 1, 1),
     (4, 'CONTAINS', '포함', '출발 노드가 도착 노드를 포함함', '#059669', 1, 1),
-    (5, 'VERSION_OF', '다른 버전', '두 노드가 서로 다른 버전임', '#D97706', 0, 1);
+    (5, 'VERSION_OF', '다른 버전', '두 노드가 서로 다른 버전임', '#D97706', 0, 1),
+    (6, 'SAME_FILE', '같은 파일', '서로 다른 경로가 동일한 실제 파일을 가리킴', '#0891B2', 0, 1);
 
 CREATE TABLE IF NOT EXISTS relations (
     relation_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -567,12 +571,14 @@ MVP 입력값:
 - 폴더 추가 시 내부 파일 재귀 등록은 기본 ON으로 두고 사용자가 체크박스로 끌 수 있다.
 - 폴더 추가 확인 창은 등록될 하위 폴더/파일 개수와 `CONTAINS` 관계 개수를 미리 보여준다.
 - 내부 파일을 함께 등록하면 폴더-하위 폴더-파일 계층에 맞춰 `CONTAINS` 관계를 자동 생성한다.
-- MVP에서는 `path` 기준 중복만 검사한다.
+- 노드의 고유성은 `path`를 기준으로 판단한다.
 - 같은 `path`가 이미 등록되어 있으면 새 노드를 만들지 않는다.
+- 서로 다른 경로가 같은 `(file_id, volume_serial)`을 가지면 두 경로를 별도 노드로 저장하고 비방향 `SAME_FILE(같은 파일)` 관계를 강도 `HIGH`로 자동 생성한다.
+- 기존 DB의 `(file_id, volume_serial)` 고유 제약은 시작 시 제거하고 조회용 일반 인덱스로 마이그레이션한다.
 - 중복 팝업에는 [기존 노드로 이동], [관계 추가하기], [취소]를 제공한다.
 - [기존 노드로 이동]은 그래프에서 기존 노드를 포커스한다.
 - [관계 추가하기]는 기존 노드를 선택 상태로 두고 관계 추가 흐름으로 이어간다.
-- `file_id`/`file_hash` 기반 중복 판단은 Phase 2 이후에 구현한다.
+- 같은 해시이지만 파일 ID가 다른 복사본은 자동으로 `같은 파일` 관계를 만들지 않으며 중복 후보 기능에서 별도로 다룬다.
 ```
 
 ### 8.3 관계 추가
@@ -813,6 +819,8 @@ MVP에서는 watchdog 기반 실시간 감시를 넣지 않습니다.
 
 최근 반영한 변경 메모:
 
+- `QLockFile` 기반 단일 인스턴스 잠금을 추가해 FileGraph 프로세스가 한 번에 하나만 실행되도록 했다.
+- 서로 다른 경로가 동일한 실제 파일을 가리키는 하드 링크를 별도 노드로 허용하고 `같은 파일(SAME_FILE)` 관계를 자동 생성하도록 DB 제약과 마이그레이션을 변경했다.
 - 작업 패널과 별도 설정 화면을 분리했다. 설정 화면에서 그래프 표시, 노드 색상, 강조 색상, 확장자 아이콘 매핑, 무시 폴더 설정을 관리한다.
 - 노드 이름 표시 옵션은 `폴더 이름만`, `파일 이름만`, `둘 다`, `마우스가 올라가면 보이기`로 세분화했다. 타입별 표시 모드에서도 기본 표시되지 않는 타입은 hover 시 이름이 보인다.
 - 노드 라벨 자동 줄바꿈은 파일명과 확장자가 중간에서 잘리지 않도록 개선했다. 확장자는 한 줄에 유지하고, 파일명 본문은 공백, 언더바, 대시 기준으로 줄바꿈한다.
