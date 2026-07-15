@@ -143,3 +143,19 @@ def test_focus_graph_data_filters_out_unrelated_nodes(database):
     assert {node["node_id"] for node in data["nodes"]} == {center_id, neighbor_id}
     assert unrelated_id not in {node["node_id"] for node in data["nodes"]}
     assert len(data["relations"]) == 1
+
+
+def test_downstream_impact_follows_dependency_semantics(database):
+    data_id = database.add_node("C:/workspace/data.csv", node_type="FILE")
+    script_id = database.add_node("C:/workspace/analysis.py", node_type="FILE")
+    result_id = database.add_node("C:/workspace/result.csv", node_type="FILE")
+    pdf_id = database.add_node("C:/workspace/result.pdf", node_type="FILE")
+    unrelated_id = database.add_node("C:/workspace/notes.txt", node_type="FILE")
+    database.add_relation(script_id, data_id, relation_type_code="READS")
+    database.add_relation(script_id, result_id, relation_type_code="WRITES")
+    database.add_relation(result_id, pdf_id, relation_type_code="EXPORTED_AS")
+
+    impacted = GraphManager(database).get_downstream_impact_node_ids(data_id)
+
+    assert impacted == {data_id, script_id, result_id, pdf_id}
+    assert unrelated_id not in impacted

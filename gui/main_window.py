@@ -35,7 +35,7 @@ from core.file_integrity import (
     scan_file_statuses as scan_database_file_statuses,
 )
 from core.graph_manager import GraphManager
-from core.relationship_detection import analyze_registered_python_files
+from core.relationship_detection import analyze_registered_files
 from gui.control_panel import ControlPanel
 from gui.graph_viewer import (
     DEFAULT_LABEL_FONT_SIZE,
@@ -375,6 +375,7 @@ class MainWindow(QMainWindow):
         self.control_panel.analyzeRelationshipsRequested.connect(self.analyze_relationship_candidates)
         self.control_panel.approveCandidateRequested.connect(self.approve_relationship_candidate)
         self.control_panel.rejectCandidateRequested.connect(self.reject_relationship_candidate)
+        self.control_panel.impactViewRequested.connect(self.show_impact_view)
 
     def _connect_shortcuts(self) -> None:
         self.shortcuts: list[QShortcut] = []
@@ -888,7 +889,7 @@ class MainWindow(QMainWindow):
         self.control_panel.show_candidates(candidates)
 
     def analyze_relationship_candidates(self) -> None:
-        result = analyze_registered_python_files(self.database)
+        result = analyze_registered_files(self.database)
         self.refresh_candidate_panel()
         self.statusBar().showMessage(
             f"관계 후보 분석 완료: 감지 {result['detected']}개, 새 후보 {result['created']}개",
@@ -908,6 +909,21 @@ class MainWindow(QMainWindow):
         self.database.reject_relationship_candidate(candidate_id)
         self.refresh_candidate_panel()
         self.statusBar().showMessage("관계 후보를 거절했습니다.", 2500)
+
+    def show_impact_view(self, node_id: int) -> None:
+        impact_ids = self.graph_manager.get_downstream_impact_node_ids(node_id)
+        nodes = [node for node in self.database.list_nodes() if int(node["node_id"]) in impact_ids]
+        relations = [
+            relation
+            for relation in self.database.list_relations()
+            if int(relation["source_id"]) in impact_ids and int(relation["target_id"]) in impact_ids
+        ]
+        self.render_node_subset_view(
+            nodes,
+            relations=relations,
+            title="잠재 영향 파일",
+            empty_message="관계 기준으로 영향을 받을 파일이 없습니다.",
+        )
 
     def apply_collapsed_folders(self, data: dict[str, list[dict[str, Any]]]) -> dict[str, list[dict[str, Any]]]:
         if not self.collapsed_folder_node_ids:
@@ -1251,6 +1267,10 @@ class MainWindow(QMainWindow):
             message += f" 포함 관계 {contains_relation_count}개를 추가했습니다."
         if duplicate_count:
             message += f" 중복 {duplicate_count}개는 건너뛰었습니다."
+        analysis = analyze_registered_files(self.database, changed_node_ids=set(added_ids))
+        if analysis["created"]:
+            self.refresh_candidate_panel()
+            message += f" 관계 후보 {analysis['created']}개를 찾았습니다."
         self.statusBar().showMessage(message, 3500)
 
     def should_import_in_background(self, import_plan: ImportPlan) -> bool:
@@ -1318,6 +1338,11 @@ class MainWindow(QMainWindow):
             message += f", 포함 관계 {contains_relation_count}개"
         if duplicate_count:
             message += f", 중복 {duplicate_count}개 건너뜀"
+        added_ids = {int(node_id) for node_id in result.get("added_ids", [])}
+        analysis = analyze_registered_files(self.database, changed_node_ids=added_ids)
+        if analysis["created"]:
+            self.refresh_candidate_panel()
+            message += f", 관계 후보 {analysis['created']}개"
         self.statusBar().showMessage(message, 4500)
 
     def on_background_import_failed(self, message: str) -> None:

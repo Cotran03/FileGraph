@@ -171,6 +171,30 @@ class GraphManager:
 
         return visited
 
+    def get_downstream_impact_node_ids(self, center_node_id: int) -> set[int]:
+        relations = self.database.list_relations()
+        adjacency: dict[int, set[int]] = {}
+        for relation in relations:
+            source_id = int(relation["source_id"])
+            target_id = int(relation["target_id"])
+            code = str(relation.get("relation_type_code") or "")
+            if code in {"READS", "GENERATED_FROM"}:
+                source_id, target_id = target_id, source_id
+            elif code not in {"WRITES", "EXPORTED_AS", "USED_BY"}:
+                continue
+            adjacency.setdefault(source_id, set()).add(target_id)
+
+        visited = {int(center_node_id)}
+        queue = deque([int(center_node_id)])
+        while queue:
+            node_id = queue.popleft()
+            for target_id in adjacency.get(node_id, set()):
+                if target_id in visited:
+                    continue
+                visited.add(target_id)
+                queue.append(target_id)
+        return visited
+
     def get_focus_graph_data(self, center_node_id: int, *, depth: int = 2) -> dict[str, list[dict[str, Any]]]:
         focus_ids = self.get_focus_node_ids(center_node_id, depth=depth)
         nodes = [

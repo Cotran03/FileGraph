@@ -68,6 +68,7 @@ class ControlPanel(QWidget):
     analyzeRelationshipsRequested = Signal()
     approveCandidateRequested = Signal(int)
     rejectCandidateRequested = Signal(int)
+    impactViewRequested = Signal(int)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -217,6 +218,10 @@ class ControlPanel(QWidget):
         set_button_variant(self.focus_view_button, "secondary")
         focus_actions.addWidget(self.focus_view_button)
         self.node_section.body.addLayout(focus_actions)
+        self.impact_view_button = QPushButton("영향 보기")
+        self.impact_view_button.setToolTip("이 파일에 의존해 만들어지거나 이 파일을 사용하는 downstream 파일을 표시합니다.")
+        set_button_variant(self.impact_view_button, "segmented")
+        self.node_section.body.addWidget(self.impact_view_button)
         node_actions = QHBoxLayout()
         self.delete_node_button = QPushButton("선택 노드 삭제")
         set_button_variant(self.delete_node_button, "danger")
@@ -281,6 +286,7 @@ class ControlPanel(QWidget):
         self.delete_node_button.clicked.connect(self._emit_delete_node)
         self.focus_depth_input.valueChanged.connect(self._emit_focus_depth)
         self.focus_view_button.clicked.connect(self._emit_current_focus_depth)
+        self.impact_view_button.clicked.connect(self._emit_impact_view)
         self.full_view_button.clicked.connect(self.fullViewRequested.emit)
         self.apply_view_preset_button.clicked.connect(self._emit_view_preset)
         self.edit_relation_button.clicked.connect(self._emit_edit_relation)
@@ -463,6 +469,11 @@ class ControlPanel(QWidget):
     def _emit_current_focus_depth(self) -> None:
         self._emit_focus_depth(self.focus_depth_input.value())
 
+    def _emit_impact_view(self) -> None:
+        node_id = self.selected_node_id()
+        if node_id is not None:
+            self.impactViewRequested.emit(node_id)
+
     def _emit_view_preset(self) -> None:
         preset = self.view_preset_combo.currentData(Qt.UserRole)
         self.viewPresetRequested.emit(str(preset or "all"))
@@ -473,6 +484,7 @@ class ControlPanel(QWidget):
         self.delete_node_button.setEnabled(has_node or has_selection)
         self.focus_depth_input.setEnabled(has_node)
         self.focus_view_button.setEnabled(has_node)
+        self.impact_view_button.setEnabled(has_node)
         self.full_view_button.setEnabled(True)
         if self._selected_node_count > 1:
             self.delete_node_button.setText(f"선택 노드 {self._selected_node_count}개 삭제")

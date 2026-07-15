@@ -32,6 +32,7 @@ def test_init_db_seeds_default_relation_types(database):
         "SAME_FILE",
         "READS",
         "WRITES",
+        "EXPORTED_AS",
     ]
     assert relation_types[0]["name"] == "관련 있음"
 

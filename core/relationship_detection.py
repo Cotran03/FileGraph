@@ -93,26 +93,82 @@ class PythonFileReferenceDetector:
         return relation_type, target_node, f"{call_name}({raw_path!r})"
 
 
-def analyze_registered_python_files(database: DatabaseManager) -> dict[str, int]:
+class SameStemExportDetector:
+    name = "SameStemExportDetector"
+    source_extensions = {".docx", ".pptx", ".xlsx", ".odt", ".odp", ".ods"}
+    target_extensions = {".pdf"}
+
+    def detect_all(self, nodes: list[dict]) -> list[DetectedRelationship]:
+        by_parent_and_stem: dict[tuple[str, str], list[dict]] = {}
+        for node in nodes:
+            path = Path(str(node["path"]))
+            key = (str(path.parent).casefold(), path.stem.casefold())
+            by_parent_and_stem.setdefault(key, []).append(node)
+        detected = []
+        for matching_nodes in by_parent_and_stem.values():
+            sources = [n for n in matching_nodes if Path(str(n["path"])).suffix.casefold() in self.source_extensions]
+            targets = [n for n in matching_nodes if Path(str(n["path"])).suffix.casefold() in self.target_extensions]
+            for source_node in sources:
+                for target_node in targets:
+                    source_path = Path(str(source_node["path"]))
+                    target_path = Path(str(target_node["path"]))
+                    confidence = _export_confidence(source_path, target_path)
+                    detected.append(
+                        DetectedRelationship(
+                            source_node_id=int(source_node["node_id"]),
+                            target_node_id=int(target_node["node_id"]),
+                            relation_type_code="EXPORTED_AS",
+                            confidence=confidence,
+                            detector=self.name,
+                            evidence=(
+                                f"같은 폴더의 동일 파일명 `{source_path.name}` / `{target_path.name}`"
+                                f" · 수정 시각 근접도 반영"
+                            ),
+                        )
+                    )
+        return detected
+
+
+def analyze_registered_files(
+    database: DatabaseManager,
+    *,
+    changed_node_ids: set[int] | None = None,
+) -> dict[str, int]:
     nodes = database.list_nodes()
     nodes_by_path = {str(node["path"]).casefold(): node for node in nodes}
-    detector = PythonFileReferenceDetector()
+    candidates: list[DetectedRelationship] = []
+    python_detector = PythonFileReferenceDetector()
+    for node in nodes:
+        if changed_node_ids is not None and int(node["node_id"]) not in changed_node_ids:
+            continue
+        candidates.extend(python_detector.detect(node, nodes_by_path))
+    export_candidates = SameStemExportDetector().detect_all(nodes)
+    if changed_node_ids is not None:
+        export_candidates = [
+            candidate
+            for candidate in export_candidates
+            if candidate.source_node_id in changed_node_ids or candidate.target_node_id in changed_node_ids
+        ]
+    candidates.extend(export_candidates)
     detected_count = 0
     created_count = 0
-    for node in nodes:
-        for candidate in detector.detect(node, nodes_by_path):
-            detected_count += 1
-            candidate_id = database.add_relationship_candidate(
-                candidate.source_node_id,
-                candidate.target_node_id,
-                candidate.relation_type_code,
-                confidence=candidate.confidence,
-                detector=candidate.detector,
-                evidence=candidate.evidence,
-            )
-            if candidate_id is not None:
-                created_count += 1
+    for candidate in candidates:
+        detected_count += 1
+        candidate_id = database.add_relationship_candidate(
+            candidate.source_node_id,
+            candidate.target_node_id,
+            candidate.relation_type_code,
+            confidence=candidate.confidence,
+            detector=candidate.detector,
+            evidence=candidate.evidence,
+        )
+        if candidate_id is not None:
+            created_count += 1
     return {"detected": detected_count, "created": created_count}
+
+
+def analyze_registered_python_files(database: DatabaseManager) -> dict[str, int]:
+    return analyze_registered_files(database)
 
 
 def _call_name(function: ast.expr) -> str:
@@ -127,3 +183,15 @@ def _literal_string(expression: ast.expr) -> str | None:
     if isinstance(expression, ast.Constant) and isinstance(expression.value, str):
         return expression.value
     return None
+
+
+def _export_confidence(source_path: Path, target_path: Path) -> float:
+    try:
+        seconds = abs(source_path.stat().st_mtime - target_path.stat().st_mtime)
+    except OSError:
+        return 0.65
+    if seconds <= 300:
+        return 0.85
+    if seconds <= 3600:
+        return 0.75
+    return 0.65

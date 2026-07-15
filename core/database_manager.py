@@ -70,7 +70,8 @@ INSERT OR IGNORE INTO relation_types (
     (5, 'VERSION_OF', '다른 버전', '두 노드가 서로 다른 버전임', '#D97706', 0, 1),
     (6, 'SAME_FILE', '같은 파일', '서로 다른 경로가 동일한 실제 파일을 가리킴', '#0891B2', 0, 1),
     (7, 'READS', '읽음', '출발 파일이 도착 파일을 입력으로 읽음', '#2563EB', 1, 1),
-    (8, 'WRITES', '생성/기록', '출발 파일이 도착 파일을 생성하거나 기록함', '#DC2626', 1, 1);
+    (8, 'WRITES', '생성/기록', '출발 파일이 도착 파일을 생성하거나 기록함', '#DC2626', 1, 1),
+    (9, 'EXPORTED_AS', '내보낸 파일', '출발 파일을 도착 형식으로 내보냄', '#7C3AED', 1, 1);
 
 CREATE TABLE IF NOT EXISTS relations (
     relation_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -894,6 +895,7 @@ class DatabaseManager:
         for code, name, description, color in (
             ("READS", "읽음", "출발 파일이 도착 파일을 입력으로 읽음", "#2563EB"),
             ("WRITES", "생성/기록", "출발 파일이 도착 파일을 생성하거나 기록함", "#DC2626"),
+            ("EXPORTED_AS", "내보낸 파일", "출발 파일을 도착 형식으로 내보냄", "#7C3AED"),
         ):
             self.conn.execute(
                 """
