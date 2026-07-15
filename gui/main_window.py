@@ -891,6 +891,8 @@ class MainWindow(QMainWindow):
     def analyze_relationship_candidates(self) -> None:
         result = analyze_registered_files(self.database)
         self.refresh_candidate_panel()
+        if result["created"]:
+            self.control_panel.detail_tabs.setCurrentIndex(2)
         self.statusBar().showMessage(
             f"관계 후보 분석 완료: 감지 {result['detected']}개, 새 후보 {result['created']}개",
             4000,
@@ -1270,6 +1272,7 @@ class MainWindow(QMainWindow):
         analysis = analyze_registered_files(self.database, changed_node_ids=set(added_ids))
         if analysis["created"]:
             self.refresh_candidate_panel()
+            self.control_panel.detail_tabs.setCurrentIndex(2)
             message += f" 관계 후보 {analysis['created']}개를 찾았습니다."
         self.statusBar().showMessage(message, 3500)
 
@@ -1342,6 +1345,7 @@ class MainWindow(QMainWindow):
         analysis = analyze_registered_files(self.database, changed_node_ids=added_ids)
         if analysis["created"]:
             self.refresh_candidate_panel()
+            self.control_panel.detail_tabs.setCurrentIndex(2)
             message += f", 관계 후보 {analysis['created']}개"
         self.statusBar().showMessage(message, 4500)
 

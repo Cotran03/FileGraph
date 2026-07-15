@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSpinBox,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -227,7 +228,6 @@ class ControlPanel(QWidget):
         set_button_variant(self.delete_node_button, "danger")
         node_actions.addWidget(self.delete_node_button)
         self.node_section.body.addLayout(node_actions)
-        action_root.addWidget(self.node_section)
 
         self.relation_section = Section("관계")
         self.relation_list = QListWidget()
@@ -246,7 +246,6 @@ class ControlPanel(QWidget):
         relation_actions.addWidget(self.edit_relation_button)
         relation_actions.addWidget(self.delete_relation_button)
         self.relation_section.body.addLayout(relation_actions)
-        action_root.addWidget(self.relation_section, 1)
 
         self.candidate_section = Section("감지된 관계 후보")
         self.candidate_list = QListWidget()
@@ -260,7 +259,14 @@ class ControlPanel(QWidget):
         candidate_actions.addWidget(self.approve_candidate_button)
         candidate_actions.addWidget(self.reject_candidate_button)
         self.candidate_section.body.addLayout(candidate_actions)
-        action_root.addWidget(self.candidate_section)
+        self.detail_tabs = QTabWidget()
+        self.detail_tabs.setObjectName("detailTabs")
+        self.detail_tabs.setDocumentMode(True)
+        self.detail_tabs.setMinimumHeight(330)
+        self.detail_tabs.addTab(self.node_section, "파일 맥락")
+        self.detail_tabs.addTab(self.relation_section, "관계")
+        self.detail_tabs.addTab(self.candidate_section, "후보")
+        action_root.addWidget(self.detail_tabs)
 
         self.summary = QLabel("노드 0개 / 관계 0개")
         self.summary.setObjectName("summary")
@@ -384,6 +390,9 @@ class ControlPanel(QWidget):
             self.candidate_list.addItem(item)
         if candidates:
             self.candidate_list.setCurrentRow(0)
+            self.detail_tabs.setTabText(2, f"후보 ({len(candidates)})")
+        else:
+            self.detail_tabs.setTabText(2, "후보")
         self._sync_candidate_buttons()
 
     def show_relations(self, relations: list[dict[str, Any]]) -> None:

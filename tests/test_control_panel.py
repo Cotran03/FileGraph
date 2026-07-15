@@ -186,6 +186,32 @@ def test_action_panel_scrolls_when_window_height_is_small(app):
     panel.close()
 
 
+def test_detail_sections_use_compact_tabs(app):
+    panel = ControlPanel()
+
+    assert panel.detail_tabs.count() == 3
+    assert [panel.detail_tabs.tabText(index) for index in range(3)] == [
+        "파일 맥락",
+        "관계",
+        "후보",
+    ]
+
+    panel.show_candidates(
+        [
+            {
+                "candidate_id": 1,
+                "source_name": "analysis.py",
+                "target_name": "data.csv",
+                "suggested_relation_type_name": "읽음",
+                "confidence": 0.95,
+                "evidence": "analysis.py:2",
+            }
+        ]
+    )
+
+    assert panel.detail_tabs.tabText(2) == "후보 (1)"
+
+
 def test_control_panel_does_not_keep_embedded_settings_controls(app):
     panel = ControlPanel()
 
