@@ -1,5 +1,6 @@
 import os
 import sys
+from typing import Any, Callable
 
 from core.database_manager import DatabaseManager
 from gui.main_window import MainWindow
@@ -44,9 +45,31 @@ def initialize_runtime() -> dict[str, str]:
     return paths
 
 
+def acquire_instance_lock(
+    run_data_dir: str,
+    *,
+    lock_factory: Callable[[str], Any] | None = None,
+):
+    if lock_factory is None:
+        from PySide6.QtCore import QLockFile
+
+        lock_factory = QLockFile
+
+    os.makedirs(run_data_dir, exist_ok=True)
+    instance_lock = lock_factory(os.path.join(run_data_dir, "FileGraph.lock"))
+    if not instance_lock.tryLock(0):
+        return None
+    return instance_lock
+
+
 def run() -> int:
     from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import QApplication
+
+    paths = get_runtime_paths()
+    instance_lock = acquire_instance_lock(paths["run_data_dir"])
+    if instance_lock is None:
+        return 0
 
     paths = initialize_runtime()
     app = QApplication(sys.argv)

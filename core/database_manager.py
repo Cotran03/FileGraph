@@ -29,14 +29,14 @@ CREATE TABLE IF NOT EXISTS nodes (
     deleted_at TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE (path),
-    UNIQUE (file_id, volume_serial)
+    UNIQUE (path)
 );
 
 CREATE INDEX IF NOT EXISTS idx_nodes_path ON nodes(path);
 CREATE INDEX IF NOT EXISTS idx_nodes_name ON nodes(name);
 CREATE INDEX IF NOT EXISTS idx_nodes_file_hash ON nodes(file_hash);
 CREATE INDEX IF NOT EXISTS idx_nodes_status ON nodes(status);
+CREATE INDEX IF NOT EXISTS idx_nodes_file_identity ON nodes(file_id, volume_serial);
 
 CREATE TABLE IF NOT EXISTS relation_types (
     relation_type_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -67,7 +67,8 @@ INSERT OR IGNORE INTO relation_types (
     (2, 'REFERENCE', '참고자료', '출발 노드가 도착 노드를 참고함', '#2563EB', 1, 1),
     (3, 'GENERATED_FROM', '원본에서 생성됨', '출발 노드가 도착 노드에서 생성됨', '#7C3AED', 1, 1),
     (4, 'CONTAINS', '포함', '출발 노드가 도착 노드를 포함함', '#059669', 1, 1),
-    (5, 'VERSION_OF', '다른 버전', '두 노드가 서로 다른 버전임', '#D97706', 0, 1);
+    (5, 'VERSION_OF', '다른 버전', '두 노드가 서로 다른 버전임', '#D97706', 0, 1),
+    (6, 'SAME_FILE', '같은 파일', '서로 다른 경로가 동일한 실제 파일을 가리킴', '#0891B2', 0, 1);
 
 CREATE TABLE IF NOT EXISTS relations (
     relation_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -243,8 +244,10 @@ class DatabaseManager:
                 file_hash,
             ),
         )
+        node_id = int(cursor.lastrowid)
+        self._refresh_same_file_relations(node_id)
         self.conn.commit()
-        return int(cursor.lastrowid)
+        return node_id
 
     def restore_node(
         self,
@@ -289,6 +292,7 @@ class DatabaseManager:
                 node_id,
             ),
         )
+        self._refresh_same_file_relations(node_id)
         self.conn.commit()
         return node_id
 
@@ -741,6 +745,126 @@ class DatabaseManager:
         ):
             if column_name not in existing_columns:
                 self.conn.execute(column_sql)
+
+        self._remove_file_identity_unique_constraint()
+        self.conn.execute(
+            """
+            INSERT OR IGNORE INTO relation_types (
+                code, name, description, color, default_is_directional, is_system
+            ) VALUES (
+                'SAME_FILE', '같은 파일',
+                '서로 다른 경로가 동일한 실제 파일을 가리킴',
+                '#0891B2', 0, 1
+            )
+            """
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_nodes_file_identity ON nodes(file_id, volume_serial)"
+        )
+
+    def _remove_file_identity_unique_constraint(self) -> None:
+        has_identity_unique_constraint = False
+        for index in self.conn.execute("PRAGMA index_list(nodes)").fetchall():
+            if not index["unique"]:
+                continue
+            columns = [
+                row["name"]
+                for row in self.conn.execute(f"PRAGMA index_info('{index['name']}')").fetchall()
+            ]
+            if columns == ["file_id", "volume_serial"]:
+                has_identity_unique_constraint = True
+                break
+        if not has_identity_unique_constraint:
+            return
+
+        schema_row = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'nodes'"
+        ).fetchone()
+        if schema_row is None or not schema_row["sql"]:
+            raise DatabaseError("Could not read the nodes table schema.")
+        migrated_schema = re.sub(
+            r",\s*UNIQUE\s*\(\s*file_id\s*,\s*volume_serial\s*\)",
+            "",
+            str(schema_row["sql"]),
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        migrated_schema = re.sub(
+            r"^CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:\"nodes\"|nodes)",
+            "CREATE TABLE nodes_migrated",
+            migrated_schema,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        column_names = [
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(nodes)").fetchall()
+        ]
+        quoted_columns = ", ".join(
+            f'"{column_name.replace(chr(34), chr(34) * 2)}"'
+            for column_name in column_names
+        )
+
+        self.conn.commit()
+        self.conn.execute("PRAGMA foreign_keys = OFF")
+        try:
+            self.conn.execute("BEGIN")
+            self.conn.execute(migrated_schema)
+            self.conn.execute(
+                f"INSERT INTO nodes_migrated ({quoted_columns}) "
+                f"SELECT {quoted_columns} FROM nodes"
+            )
+            self.conn.execute("DROP TABLE nodes")
+            self.conn.execute("ALTER TABLE nodes_migrated RENAME TO nodes")
+            self.conn.execute("CREATE INDEX idx_nodes_path ON nodes(path)")
+            self.conn.execute("CREATE INDEX idx_nodes_name ON nodes(name)")
+            self.conn.execute("CREATE INDEX idx_nodes_file_hash ON nodes(file_hash)")
+            self.conn.execute("CREATE INDEX idx_nodes_status ON nodes(status)")
+            self.conn.commit()
+        except Exception:
+            if self.conn.in_transaction:
+                self.conn.rollback()
+            raise
+        finally:
+            self.conn.execute("PRAGMA foreign_keys = ON")
+
+    def _refresh_same_file_relations(self, node_id: int) -> None:
+        relation_type = self.get_relation_type_by_code("SAME_FILE")
+        node = self.get_node(node_id)
+        if relation_type is None or node is None:
+            return
+
+        relation_type_id = int(relation_type["relation_type_id"])
+        self.conn.execute(
+            """
+            DELETE FROM relations
+            WHERE relation_type_id = ? AND (source_id = ? OR target_id = ?)
+            """,
+            (relation_type_id, node_id, node_id),
+        )
+        matching_nodes = self.conn.execute(
+            """
+            SELECT node_id
+            FROM nodes
+            WHERE node_id <> ? AND file_id = ? AND volume_serial = ?
+            """,
+            (node_id, node["file_id"], node["volume_serial"]),
+        ).fetchall()
+        for matching_node in matching_nodes:
+            self.conn.execute(
+                """
+                INSERT INTO relations (
+                    relation_type_id, source_id, target_id,
+                    is_directional, strength, description
+                ) VALUES (?, ?, ?, 0, 'HIGH', ?)
+                """,
+                (
+                    relation_type_id,
+                    int(matching_node["node_id"]),
+                    node_id,
+                    "동일한 실제 파일을 가리키는 경로",
+                ),
+            )
 
 
 def normalize_path(path: str | os.PathLike[str]) -> str:

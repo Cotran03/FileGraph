@@ -1,5 +1,10 @@
+import sqlite3
+from pathlib import Path
+from uuid import uuid4
+
 import pytest
 
+import core.database_manager as database_manager_module
 from core.database_manager import (
     DatabaseManager,
     DuplicateNodeError,
@@ -24,8 +29,95 @@ def test_init_db_seeds_default_relation_types(database):
         "GENERATED_FROM",
         "CONTAINS",
         "VERSION_OF",
+        "SAME_FILE",
     ]
     assert relation_types[0]["name"] == "관련 있음"
+
+
+def test_add_node_creates_same_file_relation_for_different_paths(database, monkeypatch):
+    monkeypatch.setattr(
+        database_manager_module,
+        "get_file_identity",
+        lambda _path: {"file_id": "shared-file-id", "volume_serial": "E:"},
+    )
+
+    first_id = database.add_node("E:/tools/git.exe", node_type="FILE")
+    second_id = database.add_node("E:/tools/git-lfs.exe", node_type="FILE")
+
+    assert first_id != second_id
+    relations = database.list_relations()
+    assert len(relations) == 1
+    assert relations[0]["relation_type_code"] == "SAME_FILE"
+    assert relations[0]["relation_type_name"] == "같은 파일"
+    assert relations[0]["is_directional"] == 0
+    assert relations[0]["strength"] == "HIGH"
+
+
+def test_same_file_relation_is_hidden_while_matching_node_is_deleted(database, monkeypatch):
+    monkeypatch.setattr(
+        database_manager_module,
+        "get_file_identity",
+        lambda _path: {"file_id": "shared-file-id", "volume_serial": "E:"},
+    )
+
+    first_id = database.add_node("E:/tools/git-lfs.exe", node_type="FILE")
+    database.update_node_status(first_id, "DELETED")
+    database.add_node("E:/tools/git.exe", node_type="FILE")
+
+    assert database.list_relations() == []
+    assert database.list_relations(include_deleted=True)[0]["relation_type_code"] == "SAME_FILE"
+
+
+def test_init_db_migrates_legacy_file_identity_unique_constraint(monkeypatch):
+    db_path = Path("tests") / f"legacy-{uuid4().hex}.db"
+    connection = sqlite3.connect(db_path)
+    connection.executescript(
+        """
+        CREATE TABLE nodes (
+            node_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_id TEXT NOT NULL,
+            volume_serial TEXT NOT NULL,
+            node_type TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'ACTIVE',
+            name TEXT NOT NULL,
+            path TEXT NOT NULL,
+            file_hash TEXT,
+            layout_x REAL,
+            layout_y REAL,
+            note TEXT,
+            highlight_color TEXT,
+            last_seen TEXT,
+            deleted_at TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (path),
+            UNIQUE (file_id, volume_serial)
+        );
+        INSERT INTO nodes (
+            file_id, volume_serial, node_type, status, name, path
+        ) VALUES (
+            'shared-file-id', 'E:', 'FILE', 'ACTIVE', 'git.exe', 'E:\\tools\\git.exe'
+        );
+        """
+    )
+    connection.close()
+
+    migrated = DatabaseManager(db_path)
+    try:
+        migrated.init_db()
+        monkeypatch.setattr(
+            database_manager_module,
+            "get_file_identity",
+            lambda _path: {"file_id": "shared-file-id", "volume_serial": "E:"},
+        )
+        migrated.add_node("E:/tools/git-lfs.exe", node_type="FILE")
+
+        assert len(migrated.list_nodes()) == 2
+        assert migrated.list_relations()[0]["relation_type_code"] == "SAME_FILE"
+        assert migrated.conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        migrated.close()
+        db_path.unlink(missing_ok=True)
 
 
 def test_add_node_rejects_duplicate_path(database):
